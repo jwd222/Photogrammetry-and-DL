@@ -8,7 +8,8 @@ implementation of the mean-shift algorithm in [mean-shift.py](photogrammetry/mea
 implementation of the p3p algorithm with visualizer in [p3p_v4.1.py](photogrammetry/p3p/p3p_v4.1.py) file
 
 
-# PyTorch Tutorials
+# DL
+#### Code implementation of various algorithms with visualizations from the playlist: [Link](https://youtube.com/playlist?list=PLhhyoLH6IjfxeoooqP9rhU3HJIAVAJ3Vz&si=wM0jMsoSBzi4SMdI) 
 readme.md updating
 ### 3. Simple Fullnet
 ### 4. Simple CNN
