@@ -7,33 +7,30 @@ from torch.utils.data import DataLoader
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 
-
-# Create Fully Connected Neural Network
-class NN(nn.Module):
-    def __init__(self, input_size, num_classes):
-        super(NN, self).__init__()
-        self.fc1 = nn.Linear(input_size, 50)
-        self.fc2 = nn.Linear(50, num_classes)
-
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
-
-
-# model = NN(784, 10)
-# x = torch.randn((64, 784))
-# print(model(x).shape)
-
 # Set Device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Hyperparameters
-input_size = 784
+input_size = 28
+sequence_length = 28
+num_layers = 2
+hidden_size = 256
 num_classes = 10
 learing_rate = 0.001
 batch_size = 64
 num_epochs = 1
+
+
+# Create RNN
+class RNN(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, num_classes):
+        super(RNN, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.rnn = nn.RNN(input_size, hidden_size, num_layers, batch_first=True)
+        # Nxtimexfeatures
+        self.fc = nn.Linear(hidden_size * sequence_length, num_classes)
+
 
 # Load Data
 train_dataset = datasets.MNIST(
@@ -67,6 +64,7 @@ for epoch in range(num_epochs):
         # Forward
         scores = model(data)
         loss = criterion(scores, targets)
+        # print(f"loss for epoch {epoch} batch {batch_idx}: {loss}")
 
         # Backward
         optimizer.zero_grad()
