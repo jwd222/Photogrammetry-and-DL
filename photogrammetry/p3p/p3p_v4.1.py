@@ -2,7 +2,7 @@ import sys
 import numpy as np
 import cv2
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QLabel, QPushButton, QDoubleSpinBox, QGroupBox, QGridLayout, QSpinBox)
+                             QLabel, QPushButton, QDoubleSpinBox, QGroupBox, QGridLayout, QSpinBox, QCheckBox)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
 from PyQt5.QtOpenGL import QGLWidget, QGLFormat, QGL
@@ -44,6 +44,11 @@ class GLWidget(QGLWidget):
         self.show_image_plane = True # New toggle for image plane
         self.image_plane_points_3d = [] # Stores 3D points on the image plane
         self.image_plane_corners_3d = [] # Stores 3D corners of the image plane
+        
+        # Estimated Camera Pose for Disambiguation
+        self.use_estimated_pose_for_disambiguation = False
+        self.estimated_camera_position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        self.estimated_camera_rotation_euler = np.array([0.0, 0.0, 0.0], dtype=np.float32) # Roll, Pitch, Yaw in degrees
 
         self.setMinimumSize(600, 500)
 
@@ -252,6 +257,17 @@ class GLWidget(QGLWidget):
         
         self.last_pos = event.pos()
         self.update()
+        
+    def set_estimated_pose(self, x, y, z, roll, pitch, yaw):
+        self.estimated_camera_position = np.array([x, y, z], dtype=np.float32)
+        self.estimated_camera_rotation_euler = np.array([roll, pitch, yaw], dtype=np.float32)
+        self.camera_found = False # Invalidate current pose, force recompute
+        self.update()
+
+    def set_use_estimated_pose(self, checked):
+        self.use_estimated_pose_for_disambiguation = checked
+        self.camera_found = False # Invalidate current pose, force recompute
+        self.update()
     
     def compute_p3p(self):
         # Define camera intrinsic parameters
@@ -282,8 +298,69 @@ class GLWidget(QGLWidget):
 
         print(f"Found {len(rvecs)} solutions from solveP3P (using SOLVEPNP_P3P)")
 
-        # For visualization, we'll just pick the first solution.
-        best_idx = 0 
+        best_idx = 0 # Default to first solution
+        if self.use_estimated_pose_for_disambiguation and len(rvecs) > 1:
+            print("Using estimated pose for disambiguation...")
+            min_diff = float('inf')
+            
+            # Convert estimated Euler angles to rotation matrix
+            # OpenCV uses ZYX (Yaw-Pitch-Roll) convention for Euler angles
+            # Roll (X), Pitch (Y), Yaw (Z)
+            # R_x = np.array([[1, 0, 0], [0, cos(roll), -sin(roll)], [0, sin(roll), cos(roll)]])
+            # R_y = np.array([[cos(pitch), 0, sin(pitch)], [0, 1, 0], [-sin(pitch), 0, cos(pitch)]])
+            # R_z = np.array([[cos(yaw), -sin(yaw), 0], [sin(yaw), cos(yaw), 0], [0, 0, 1]])
+            # R_est = R_z @ R_y @ R_x (for ZYX)
+            
+            # For simplicity and consistency with typical camera systems, let's assume
+            # the estimated_camera_rotation_euler represents rotations around X, Y, Z axes
+            # in radians. We'll convert degrees to radians.
+            roll_rad, pitch_rad, yaw_rad = np.deg2rad(self.estimated_camera_rotation_euler)
+
+            # Create rotation matrices for each axis
+            Rx = np.array([[1, 0, 0],
+                           [0, np.cos(roll_rad), -np.sin(roll_rad)],
+                           [0, np.sin(roll_rad), np.cos(roll_rad)]], dtype=np.float64)
+            Ry = np.array([[np.cos(pitch_rad), 0, np.sin(pitch_rad)],
+                           [0, 1, 0],
+                           [-np.sin(pitch_rad), 0, np.cos(pitch_rad)]], dtype=np.float64)
+            Rz = np.array([[np.cos(yaw_rad), -np.sin(yaw_rad), 0],
+                           [np.sin(yaw_rad), np.cos(yaw_rad), 0],
+                           [0, 0, 1]], dtype=np.float64)
+            
+            # Combined rotation matrix (e.g., ZYX order, common for camera orientation)
+            # This R_est is R_camera_world_estimate
+            R_est_camera_world = Rz @ Ry @ Rx 
+            T_est_camera_world = self.estimated_camera_position.reshape(3,1) # This is the world origin in camera coords
+
+            # Convert estimated camera position (world coords) to tvec (world origin in camera coords)
+            # T_camera_world = -R_camera_world @ C_world
+            # So, if self.estimated_camera_position is C_world, then T_est_tvec = -R_est_camera_world @ self.estimated_camera_position
+            T_est_tvec = -R_est_camera_world @ self.estimated_camera_position.reshape(3,1)
+
+
+            for i in range(len(rvecs)):
+                rvec_candidate = rvecs[i]
+                tvec_candidate = tvecs[i]
+
+                R_candidate, _ = cv2.Rodrigues(rvec_candidate)
+                
+                # Calculate translation difference
+                trans_diff = np.linalg.norm(tvec_candidate - T_est_tvec)
+                
+                # Calculate rotation difference (angular distance)
+                R_diff = R_candidate @ R_est_camera_world.T # R_candidate * R_est_inv
+                rvec_diff, _ = cv2.Rodrigues(R_diff)
+                rot_diff = np.linalg.norm(rvec_diff) # Magnitude of rotation vector is angle in radians
+
+                # Combine differences (can be weighted)
+                # A simple sum, you might want to weight rotation more or less
+                total_diff = trans_diff + rot_diff * 10 # Weight rotation more as it's in radians
+
+                if total_diff < min_diff:
+                    min_diff = total_diff
+                    best_idx = i
+            print(f"Selected solution {best_idx+1} based on minimum difference ({min_diff:.4f}) to estimate.")
+            
         rvec = rvecs[best_idx]
         tvec = tvecs[best_idx]
 
@@ -419,6 +496,44 @@ class MainWindow(QMainWindow):
         self.image_group = QGroupBox("Image Points (2D Image Coordinates)")
         self.image_group.setLayout(self.image_layout)
         control_layout.addWidget(self.image_group)
+        
+        # Estimated Pose Group
+        self.estimated_pose_group = QGroupBox("Estimated Camera Pose (for Disambiguation)")
+        self.estimated_pose_layout = QGridLayout()
+
+        self.use_estimate_checkbox = QCheckBox("Use Estimated Pose")
+        self.use_estimate_checkbox.setChecked(self.gl_widget.use_estimated_pose_for_disambiguation)
+        self.use_estimate_checkbox.stateChanged.connect(self.gl_widget.set_use_estimated_pose)
+        self.estimated_pose_layout.addWidget(self.use_estimate_checkbox, 0, 0, 1, 6)
+
+        # Estimated Position
+        self.est_x_spin = QDoubleSpinBox(); self.est_x_spin.setDecimals(2); self.est_x_spin.setRange(-10.0, 10.0); self.est_x_spin.setSingleStep(0.1); self.est_x_spin.setValue(0.0)
+        self.est_y_spin = QDoubleSpinBox(); self.est_y_spin.setDecimals(2); self.est_y_spin.setRange(-10.0, 10.0); self.est_y_spin.setSingleStep(0.1); self.est_y_spin.setValue(0.0)
+        self.est_z_spin = QDoubleSpinBox(); self.est_z_spin.setDecimals(2); self.est_z_spin.setRange(-10.0, 10.0); self.est_z_spin.setSingleStep(0.1); self.est_z_spin.setValue(0.0)
+        
+        self.estimated_pose_layout.addWidget(QLabel("Pos X:"), 1, 0); self.estimated_pose_layout.addWidget(self.est_x_spin, 1, 1)
+        self.estimated_pose_layout.addWidget(QLabel("Y:"), 1, 2); self.estimated_pose_layout.addWidget(self.est_y_spin, 1, 3)
+        self.estimated_pose_layout.addWidget(QLabel("Z:"), 1, 4); self.estimated_pose_layout.addWidget(self.est_z_spin, 1, 5)
+
+        # Estimated Rotation (Euler angles: Roll, Pitch, Yaw in degrees)
+        self.est_roll_spin = QDoubleSpinBox(); self.est_roll_spin.setDecimals(1); self.est_roll_spin.setRange(-180.0, 180.0); self.est_roll_spin.setSingleStep(1.0); self.est_roll_spin.setValue(0.0)
+        self.est_pitch_spin = QDoubleSpinBox(); self.est_pitch_spin.setDecimals(1); self.est_pitch_spin.setRange(-180.0, 180.0); self.est_pitch_spin.setSingleStep(1.0); self.est_pitch_spin.setValue(0.0)
+        self.est_yaw_spin = QDoubleSpinBox(); self.est_yaw_spin.setDecimals(1); self.est_yaw_spin.setRange(-180.0, 180.0); self.est_yaw_spin.setSingleStep(1.0); self.est_yaw_spin.setValue(0.0)
+
+        self.estimated_pose_layout.addWidget(QLabel("Rot Roll:"), 2, 0); self.estimated_pose_layout.addWidget(self.est_roll_spin, 2, 1)
+        self.estimated_pose_layout.addWidget(QLabel("Pitch:"), 2, 2); self.estimated_pose_layout.addWidget(self.est_pitch_spin, 2, 3)
+        self.estimated_pose_layout.addWidget(QLabel("Yaw:"), 2, 4); self.estimated_pose_layout.addWidget(self.est_yaw_spin, 2, 5)
+
+        # Connect signals to update estimated pose in GLWidget
+        self.est_x_spin.valueChanged.connect(self.update_estimated_pose)
+        self.est_y_spin.valueChanged.connect(self.update_estimated_pose)
+        self.est_z_spin.valueChanged.connect(self.update_estimated_pose)
+        self.est_roll_spin.valueChanged.connect(self.update_estimated_pose)
+        self.est_pitch_spin.valueChanged.connect(self.update_estimated_pose)
+        self.est_yaw_spin.valueChanged.connect(self.update_estimated_pose)
+
+        self.estimated_pose_group.setLayout(self.estimated_pose_layout)
+        control_layout.addWidget(self.estimated_pose_group)
 
         # Add control panel to layout
         main_layout.addWidget(control_panel, 2)
@@ -543,6 +658,15 @@ class MainWindow(QMainWindow):
         self.gl_widget.image_plane_points_3d = [] # Clear image plane data
         self.gl_widget.image_plane_corners_3d = [] # Clear image plane data
         self.gl_widget.update()
+        
+    def update_estimated_pose(self):
+        x = self.est_x_spin.value()
+        y = self.est_y_spin.value()
+        z = self.est_z_spin.value()
+        roll = self.est_roll_spin.value()
+        pitch = self.est_pitch_spin.value()
+        yaw = self.est_yaw_spin.value()
+        self.gl_widget.set_estimated_pose(x, y, z, roll, pitch, yaw)
     
     def toggle_option(self, option):
         if option == 'rays':
