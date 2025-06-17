@@ -18,23 +18,22 @@ class GLWidget(QGLWidget):
         fmt.setProfile(QGLFormat.CompatibilityProfile) # Use compatibility profile
         super(GLWidget, self).__init__(fmt, parent)
         self.main_window = parent
-        # # Initial world points (example: a triangle in 3D space, small scale for visualization)
-        # self.world_points = np.array([[1.0, 0.0, 3.0], [-1.0, 0.0, 3.0], [0.0, 1.0, 3.0]], dtype=np.float32)
-        # # Initial image points (pixel coordinates, consistent with camera_matrix)
-        # # Assuming a 1024x768 image, cx=512, cy=384
-        # self.image_points = np.array([[600.0, 300.0], [400.0, 300.0], [512.0, 450.0]], dtype=np.float32)
         
-        # Data will be set externally by MainWindow
-        self.world_points = np.array([], dtype=np.float32).reshape(0,3)
+        # Data for solvePnP (original EPSG coordinates)
+        self.original_world_points = np.array([], dtype=np.float64).reshape(0,3)
         self.image_points = np.array([], dtype=np.float32).reshape(0,2)
+        
+        # Data for OpenGL drawing (scaled and centered)
+        self.display_world_points = np.array([], dtype=np.float32).reshape(0,3)
         
         # Default intrinsic parameters (will be updated by dialog)
         self.fx, self.fy = 800.0, 800.0
         self.cx, self.cy = 512.0, 384.0
         self.image_width, self.image_height = 1024.0, 768.0
 
-        self.camera_position = np.array([0, 0, 0], dtype=np.float32)
-        self.camera_rotation = np.eye(3, dtype=np.float32)
+        # Camera pose in display coordinates for OpenGL
+        self.camera_position = np.array([0, 0, 0], dtype=np.float32) # Scaled for display
+        self.camera_rotation = np.eye(3, dtype=np.float32) # Rotation matrix (world to camera) - remains unscaled
         self.camera_found = False
         
         # Viewpoint rotation
@@ -51,14 +50,20 @@ class GLWidget(QGLWidget):
         self.show_camera = True
         self.show_points = True
         self.show_reprojection = True
-        self.show_image_plane = True # New toggle for image plane
-        self.image_plane_points_3d = [] # Stores 3D points on the image plane
-        self.image_plane_corners_3d = [] # Stores 3D corners of the image plane
+        self.show_image_plane = True
+        self.image_plane_points_3d = [] # Stores 3D points on the image plane (scaled for display)
+        self.image_plane_corners_3d = [] # Stores 3D corners of the image plane (scaled for display)
         
-        # Estimated Camera Pose for Disambiguation
+        # Estimated Camera Pose for Disambiguation (in original EPSG coordinates)
         self.use_estimated_pose_for_disambiguation = False
-        self.estimated_camera_position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        self.estimated_camera_position_epsg = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         self.estimated_camera_rotation_euler = np.array([0.0, 0.0, 0.0], dtype=np.float32) # Roll, Pitch, Yaw in degrees
+
+        # Scaling parameters received from MainWindow for internal scaling/unscaling
+        self.local_origin_3d_vis = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        self.scale_factor_vis = 1.0
+        self.z_exaggeration_factor_vis = 1.0
+        self.exaggerate_z_vis = False
 
         self.setMinimumSize(600, 500)
 
@@ -102,26 +107,23 @@ class GLWidget(QGLWidget):
         
         self.draw_axes()
         
-        # Draw world points
+        # Draw world points (using display_world_points)
         if self.show_points:
             glColor3f(1, 0.5, 0) # Orange
-            for point in self.world_points:
+            for point in self.display_world_points:
                 glPushMatrix()
                 glTranslatef(point[0], point[1], point[2])
                 gluSphere(self.quadric, 0.1, 16, 16) 
                 glPopMatrix()
         
-        # Draw camera
+        # Draw camera (using camera_position which is already scaled)
         if self.camera_found and self.show_camera:
             glPushMatrix()
             # Apply the inverse of the camera's world pose to position the camera in the scene
-            # The camera_position is the world coordinates of the camera center.
+            # The camera_position is the world coordinates of the camera center (scaled for display).
             # The camera_rotation is the rotation matrix from world to camera coordinates.
-            # To draw the camera in the world, we need to apply its world pose.
-            # The camera's world rotation is R_world_camera = R_camera_world.T
-            # The camera's world translation is T_world_camera = -R_world_camera @ T_camera_world
             
-            # First, translate to the camera's world position
+            # First, translate to the camera's world position (scaled)
             glTranslatef(*self.camera_position)
             
             # Then, apply the camera's world rotation (inverse of the rotation matrix from solvePnP)
@@ -133,21 +135,7 @@ class GLWidget(QGLWidget):
             m[:3, :3] = rot_matrix_world_camera
             glMultMatrixf(m.T) # OpenGL expects column-major order, so transpose again
             
-            # # Draw camera body (a sphere) - Made smaller
-            # glColor3f(0.2, 0.4, 0.8) # Blueish
-            # gluSphere(self.quadric, 0.15, 16, 16) # Reduced radius from 0.3 to 0.15
-            
-            # # Draw camera lens/frustum (a cone) - Made smaller
-            # glPushMatrix()
-            # glTranslatef(0, 0, 0.15) # Move slightly forward from sphere center (adjusted for new sphere size)
-            # glRotatef(90, 1, 0, 0) # Rotate to make cone point along Z-axis (initially points along Y for gluCylinder)
-            # gluCylinder(self.quadric, 0.2, 0.0, 0.4, 16, 16) # Reduced base radius from 0.4 to 0.2, height from 0.8 to 0.4
-            # gluDisk(self.quadric, 0, 0.2, 16, 1) # Base of the cone (adjusted for new base radius)
-            # glPopMatrix()
-            
             # --- Draw fixed-size wireframe frustum ---
-
-            # Set the base size of the image plane in visual units
             aspect_ratio = self.image_width / self.image_height
             base_height = 2.0
             base_width = aspect_ratio * base_height
@@ -202,30 +190,29 @@ class GLWidget(QGLWidget):
             glEnd()
             glEnable(GL_LIGHTING)
         
-        # Draw rays from camera to points
+        # Draw rays from camera to points (using display_world_points)
         if self.show_rays and self.camera_found:
             glDisable(GL_LIGHTING)
             glBegin(GL_LINES)
             glColor3f(0.8, 0.8, 0.8) # Grey
-            for i in range(len(self.world_points)):
+            for i in range(len(self.display_world_points)):
                 glVertex3fv(self.camera_position)
-                glVertex3fv(self.world_points[i])
+                glVertex3fv(self.display_world_points[i])
             glEnd()
             glEnable(GL_LIGHTING)
         
         # Draw reprojection (showing the world points again, but in a different color)
-        # This visually confirms that the camera pose found aligns with these points.
         if self.show_reprojection and self.camera_found:
             glDisable(GL_LIGHTING)
             glColor3f(0, 1, 0) # Green
-            for i in range(len(self.world_points)):
+            for i in range(len(self.display_world_points)):
                 glPushMatrix()
-                glTranslatef(self.world_points[i][0], self.world_points[i][1], self.world_points[i][2])
+                glTranslatef(self.display_world_points[i][0], self.display_world_points[i][1], self.display_world_points[i][2])
                 gluSphere(self.quadric, 0.05, 10, 10) 
                 glPopMatrix()
             glEnable(GL_LIGHTING)
 
-        # Draw Image Plane and Projected Points
+        # Draw Image Plane and Projected Points (using scaled image_plane_corners_3d and image_plane_points_3d)
         if self.show_image_plane and self.camera_found and self.image_plane_corners_3d:
             glDisable(GL_LIGHTING)
             glLineWidth(1.0)
@@ -266,7 +253,7 @@ class GLWidget(QGLWidget):
         glVertex3f(0, 0, 0)
         glVertex3f(0, 2, 0)
         # Z axis (blue)
-        glColor3f(1, 1, 0)
+        glColor3f(1, 1, 0) # Changed to yellow for better visibility against blue camera axis
         glVertex3f(0, 0, 0)
         glVertex3f(0, 0, 2)
         glEnd()
@@ -294,7 +281,6 @@ class GLWidget(QGLWidget):
             self.y_rot = (self.y_rot + dx) % 360
         elif event.buttons() & Qt.MiddleButton: # Middle mouse button for panning
             # Scale translation by zoom level to make it feel natural
-            # Adjust sensitivity based on your preference
             self.x_trans += dx * 0.005 * (self.zoom / 10.0) 
             self.y_trans -= dy * 0.005 * (self.zoom / 10.0) # Invert Y for intuitive panning
         elif event.buttons() & Qt.RightButton:
@@ -304,13 +290,14 @@ class GLWidget(QGLWidget):
         self.update()
         
     def set_estimated_pose(self, x, y, z, roll, pitch, yaw):
-        self.estimated_camera_position = np.array([x, y, z], dtype=np.float32)
+        # Store estimated pose in original EPSG coordinates
+        self.estimated_camera_position_epsg = np.array([x, y, z], dtype=np.float64)
         self.estimated_camera_rotation_euler = np.array([roll, pitch, yaw], dtype=np.float32)
         self.camera_found = False # Invalidate current pose, force recompute
         self.update()
 
     def set_use_estimated_pose(self, checked):
-        self.use_estimated_pose_for_disambiguation = checked
+        self.use_estimated_pose_for_disambiguation = True if checked else False
         self.camera_found = False # Invalidate current pose, force recompute
         self.update()
 
@@ -321,18 +308,53 @@ class GLWidget(QGLWidget):
         self.camera_found = False # Invalidate pose if intrinsics change
         self.update()
 
-    def set_world_points(self, points_3d_local):
-        self.world_points = np.array(points_3d_local, dtype=np.float32)
+    def set_original_world_points(self, points_epsg):
+        self.original_world_points = points_epsg
+        self.camera_found = False
+        # No update() here, as set_world_points_for_display will trigger it.
+
+    def set_world_points_for_display(self, points_scaled):
+        self.display_world_points = points_scaled
         self.camera_found = False
         self.update()
 
     def set_image_points(self, points_2d):
-        self.image_points = np.array(points_2d, dtype=np.float32)
+        self.image_points = points_2d
         self.camera_found = False
         self.update()
-    
+
+    def set_scaling_params(self, origin, scale_factor, z_factor, exaggerate_z):
+        self.local_origin_3d_vis = origin
+        self.scale_factor_vis = scale_factor
+        self.z_exaggeration_factor_vis = z_factor
+        self.exaggerate_z_vis = exaggerate_z
+        self.camera_found = False # Invalidate pose if scaling changes
+        self.update()
+
+    def scale_point_for_display(self, point_epsg):
+        """Internal helper to scale a single point (or array of points) from EPSG to display coordinates."""
+        if point_epsg.ndim == 1:
+            point_epsg = point_epsg.reshape(1, 3)
+        
+        centered = point_epsg - self.local_origin_3d_vis
+        if self.exaggerate_z_vis:
+            centered[:, 2] *= self.z_exaggeration_factor_vis
+        scaled = centered * self.scale_factor_vis
+        return scaled.flatten() if point_epsg.shape[0] == 1 else scaled
+
+    def unscale_point_from_display(self, point_scaled):
+        """Internal helper to unscale a single point (or array of points) from display to EPSG coordinates."""
+        if point_scaled.ndim == 1:
+            point_scaled = point_scaled.reshape(1, 3)
+
+        unscaled = point_scaled / self.scale_factor_vis
+        if self.exaggerate_z_vis:
+            unscaled[:, 2] /= self.z_exaggeration_factor_vis
+        original = unscaled + self.local_origin_3d_vis
+        return original.flatten() if point_scaled.shape[0] == 1 else original
+
     def compute_p3p(self):
-        if len(self.world_points) < 3 or len(self.image_points) < 3:
+        if len(self.original_world_points) < 3 or len(self.image_points) < 3:
             print("Need at least 3 world and 3 image points to compute PnP.")
             self.camera_found = False
             self.image_plane_points_3d = []
@@ -346,31 +368,59 @@ class GLWidget(QGLWidget):
         # No distortion coefficients for simplicity, assume ideal camera
         dist_coeffs = np.zeros((4, 1), dtype=np.float64) 
         
-        # Choose whether to use solvePnPGeneric
-        use_generic = self.pnp_flag in [
-            cv2.SOLVEPNP_P3P,
-            cv2.SOLVEPNP_AP3P,
-            cv2.SOLVEPNP_DLS
-        ]
+        # Use self.original_world_points for solvePnP
+        world_points_for_pnp = self.original_world_points.reshape(-1, 1, 3)
+        image_points_for_pnp = self.image_points.reshape(-1, 1, 2)
 
-        if use_generic:
-            success, rvecs, tvecs, _ = cv2.solvePnPGeneric(
-                self.world_points.reshape(-1, 1, 3),
-                self.image_points.reshape(-1, 1, 2),
-                camera_matrix,
-                dist_coeffs,
-                flags=self.pnp_flag
-            )
-        else:
-            success, rvec, tvec = cv2.solvePnP(
-                self.world_points.reshape(-1, 1, 3),
-                self.image_points.reshape(-1, 1, 2),
-                camera_matrix,
-                dist_coeffs,
-                flags=self.pnp_flag
-            )
-            rvecs = [rvec]
-            tvecs = [tvec]
+        # use_generic = self.pnp_flag in [
+        #     cv2.SOLVEPNP_P3P,
+        #     cv2.SOLVEPNP_AP3P,
+        #     cv2.SOLVEPNP_DLS
+        # ]
+
+        # if use_generic:
+        #     success, rvecs, tvecs, _ = cv2.solvePnPGeneric(
+        #         world_points_for_pnp,
+        #         image_points_for_pnp,
+        #         camera_matrix,
+        #         dist_coeffs,
+        #         flags=self.pnp_flag
+        #     )
+        # else:
+        #     success, rvec, tvec = cv2.solvePnP(
+        #         world_points_for_pnp,
+        #         image_points_for_pnp,
+        #         camera_matrix,
+        #         dist_coeffs,
+        #         flags=self.pnp_flag
+        #     )
+        #     rvecs = [rvec]
+        #     tvecs = [tvec]
+    
+        # debug
+        # success, rvecs, tvecs, _ = cv2.solvePnPGeneric (
+        #     world_points_for_pnp,
+        #     image_points_for_pnp,
+        #     camera_matrix,
+        #     dist_coeffs,
+        #     flags=cv2.SOLVEPNP_SQPNP
+        # )
+        
+        success, rvec, tvec, inliers = cv2.solvePnPRansac(
+            world_points_for_pnp,
+            image_points_for_pnp,
+            camera_matrix,
+            dist_coeffs,
+            reprojectionError=5.0,
+            iterationsCount=100, # Number of RANSAC iterations
+            confidence=0.99,     # Desired confidence
+            flags=cv2.SOLVEPNP_EPNP # Internal PnP method for RANSAC
+        )
+        
+        rvecs = [rvec] # RANSAC returns a single best solution
+        tvecs = [tvec]
+        self.last_inliers = inliers # Store inliers for reporting
+        pass
 
 
         if not success or len(rvecs) == 0:
@@ -381,27 +431,17 @@ class GLWidget(QGLWidget):
             self.update()
             return
 
-        print(f"Found {len(rvecs)} solution(s) using flag {self.pnp_flag}.")
+        # print(f"Found {len(rvecs)} solution(s) using flag {self.pnp_flag}.")
+        print(f"Found {len(rvecs)} solution(s) using flag 'cv2.SOLVEPNP_EPNP', reprojectionError=5.0, iterationsCount=100, confidence=0.99.")
 
-        best_idx = 0 # Default to first solutionlen(rvecs)
-        if self.use_estimated_pose_for_disambiguation and len(rvecs) > 1:
+        best_idx = 0
+        if self.use_estimated_pose_for_disambiguation:
             print("Using estimated pose for disambiguation...")
             min_diff = float('inf')
             
             # Convert estimated Euler angles to rotation matrix
-            # OpenCV uses ZYX (Yaw-Pitch-Roll) convention for Euler angles
-            # Roll (X), Pitch (Y), Yaw (Z)
-            # R_x = np.array([[1, 0, 0], [0, cos(roll), -sin(roll)], [0, sin(roll), cos(roll)]])
-            # R_y = np.array([[cos(pitch), 0, sin(pitch)], [0, 1, 0], [-sin(pitch), 0, cos(pitch)]])
-            # R_z = np.array([[cos(yaw), -sin(yaw), 0], [sin(yaw), cos(yaw), 0], [0, 0, 1]])
-            # R_est = R_z @ R_y @ R_x (for ZYX)
-            
-            # For simplicity and consistency with typical camera systems, let's assume
-            # the estimated_camera_rotation_euler represents rotations around X, Y, Z axes
-            # in radians. We'll convert degrees to radians.
             roll_rad, pitch_rad, yaw_rad = np.deg2rad(self.estimated_camera_rotation_euler)
 
-            # Create rotation matrices for each axis
             Rx = np.array([[1, 0, 0],
                            [0, np.cos(roll_rad), -np.sin(roll_rad)],
                            [0, np.sin(roll_rad), np.cos(roll_rad)]], dtype=np.float64)
@@ -412,24 +452,22 @@ class GLWidget(QGLWidget):
                            [np.sin(yaw_rad), np.cos(yaw_rad), 0],
                            [0, 0, 1]], dtype=np.float64)
             
-            # Combined rotation matrix (e.g., ZYX order, common for camera orientation)
-            # This R_est is R_camera_world_estimate
+            # R_est_camera_world is the rotation matrix from world to camera coordinates for the estimate
             R_est_camera_world = Rz @ Ry @ Rx 
-            T_est_camera_world = self.estimated_camera_position.reshape(3,1) # This is the world origin in camera coords
-
-            # Convert estimated camera position (world coords) to tvec (world origin in camera coords)
-            # T_camera_world = -R_camera_world @ C_world
-            # So, if self.estimated_camera_position is C_world, then T_est_tvec = -R_est_camera_world @ self.estimated_camera_position
-            T_est_tvec = -R_est_camera_world @ self.estimated_camera_position.reshape(3,1)
+            
+            # T_est_tvec is the translation of the world origin in camera coordinates for the estimate
+            # C_world_est = self.estimated_camera_position_epsg (camera center in world EPSG)
+            # T_camera_world_est = -R_camera_world_est @ C_world_est
+            T_est_tvec = -R_est_camera_world @ self.estimated_camera_position_epsg.reshape(3,1)
 
 
             for i in range(len(rvecs)):
                 rvec_candidate = rvecs[i]
-                tvec_candidate = tvecs[i]
+                tvec_candidate = tvecs[i] # This tvec is in original EPSG units from solvePnP
 
                 R_candidate, _ = cv2.Rodrigues(rvec_candidate)
                 
-                # Calculate translation difference
+                # Calculate translation difference (both tvecs are in original EPSG units)
                 trans_diff = np.linalg.norm(tvec_candidate - T_est_tvec)
                 
                 # Calculate rotation difference (angular distance)
@@ -438,7 +476,6 @@ class GLWidget(QGLWidget):
                 rot_diff = np.linalg.norm(rvec_diff) # Magnitude of rotation vector is angle in radians
 
                 # Combine differences (can be weighted)
-                # A simple sum, you might want to weight rotation more or less
                 total_diff = trans_diff + rot_diff * 10 # Weight rotation more as it's in radians
 
                 if total_diff < min_diff:
@@ -450,19 +487,75 @@ class GLWidget(QGLWidget):
         tvec = tvecs[best_idx]
 
         # Convert rotation vector to rotation matrix
-        self.camera_rotation, _ = cv2.Rodrigues(rvec)
+        self.camera_rotation, _ = cv2.Rodrigues(rvec) # This is R_camera_world (world to camera)
         
-        # tvec is the translation vector of the world origin in camera coordinates.
-        # To get the camera's position in world coordinates (C_w), we use:
-        # C_w = -R_world_camera * T_camera_world
+        # Calculate camera's position in world coordinates (EPSG)
+        # C_world = -R_world_camera * T_camera_world
         # where R_world_camera = R_camera_world.T (self.camera_rotation.T)
-        # and T_camera_world is tvec        
-        self.camera_rotation, _ = cv2.Rodrigues(rvec)
-        self.camera_position = (-self.camera_rotation.T @ tvec).flatten()
+        # and T_camera_world is tvec
+        camera_position_epsg = (-self.camera_rotation.T @ tvec).flatten()
+        
+        # Store the camera position in display coordinates for OpenGL
+        self.camera_position = self.scale_point_for_display(camera_position_epsg)
         self.camera_found = True
-        print("Chosen camera position (world coords):", self.main_window.unscale_camera_position(self.camera_position))
-        print("Rotation matrix (world to camera):\n", self.camera_rotation)
 
+        # --- Output Extrinsic Parameters ---
+        # R_world_to_cam is the rotation matrix from world to camera coordinates, which is self.camera_rotation
+        R_world_to_cam_matrix = self.camera_rotation 
+        
+        # Decompose R_world_to_cam into ZYX Euler angles (Yaw, Pitch, Roll)
+        # cv2.RQDecomp3x3 returns (roll_x, pitch_y, yaw_z) in degrees for ZYX extrinsic convention.
+        euler_angles_raw = cv2.RQDecomp3x3(R_world_to_cam_matrix)[0] 
+        yaw_z = euler_angles_raw[2]
+        pitch_y = euler_angles_raw[1]
+        roll_x = euler_angles_raw[0]
+
+        print("\n#############################################################################")
+        print("Extrinsic Input Type: Euler")
+        print("  Euler Convention: Extrinsic ZYX (Order: Yaw(Z), Pitch(Y), Roll(X))")
+        print(f"  Euler Angles (Input): [{yaw_z:.5f}, {pitch_y:.5f}, {roll_x:.5f}]")
+        print("Rotation Matrix (R_world_to_cam):\n", R_world_to_cam_matrix)
+        print(f"Camera Center C (Cx, Cy, Cz): [{camera_position_epsg[0]:.3f}, {camera_position_epsg[1]:.3f}, {camera_position_epsg[2]:.3f}]")
+        print("#############################################################################")
+        # Project world points to image plane
+        projected_image_points, _ = cv2.projectPoints(
+            self.original_world_points, # Use original 3D points
+            rvec,                       # The rotation vector from solvePnP
+            tvec,                       # The translation vector from solvePnP
+            camera_matrix,
+            dist_coeffs
+        )
+
+        projected_image_points = projected_image_points.reshape(-1, 2)
+
+        # Calculate reprojection error for each point
+        reprojection_errors = np.linalg.norm(projected_image_points - self.image_points, axis=1)
+
+        # Calculate mean reprojection error
+        mean_reprojection_error = np.mean(reprojection_errors)
+
+        print(f"--- Reprojection Error ---")
+        for i in range(len(self.original_world_points)):
+            # Mark inliers if RANSAC was used
+            inlier_status = ""
+            if self.last_inliers is not None and i in self.last_inliers:
+                inlier_status = " (INLIER)"
+            elif self.last_inliers is not None:
+                inlier_status = " (OUTLIER)"
+
+            print(f"Point {i+1}:{inlier_status}")
+            print(f"  3D World Point (Xw, Yw, Zw): {self.original_world_points[i]}")
+            print(f"  Provided 2D Image Point (u_img, v_img): {self.image_points[i]}")
+            print(f"  Projected (u, v): ({projected_image_points[i, 0]:.2f}, {projected_image_points[i, 1]:.2f})")
+            print(f"  Reprojection Error: {reprojection_errors[i]:.2f} pixels")
+        print(f"Mean Reprojection Error (All Points): {mean_reprojection_error:.2f} pixels")
+
+        if self.last_inliers is not None and len(self.last_inliers) > 0:
+            inlier_reprojection_errors = reprojection_errors[self.last_inliers.flatten()]
+            mean_inlier_reprojection_error = np.mean(inlier_reprojection_errors)
+            print(f"Mean Reprojection Error (Inliers Only): {mean_inlier_reprojection_error:.2f} pixels")
+        print("#############################################################################")
+        
         # --- Calculate 3D points for image plane visualization ---
         self.image_plane_points_3d = []
         self.image_plane_corners_3d = []
@@ -471,68 +564,74 @@ class GLWidget(QGLWidget):
             # Focal length for the image plane (can be scaled for visualization)
             # Using a small scale factor to make the plane visible and not too large
             # relative to the camera model.
-            # A common approach is to use a "normalized" image plane at Z=1,
-            # then scale its X/Y dimensions by (image_width/fx) and (image_height/fy)
-            # Or, use a fixed distance like 0.5 units in front of the camera.
-            plane_distance = 3 # Distance from camera center to image plane for visualization
+            plane_distance = 3 # Distance from camera center to image plane for visualization (in display units)
             
             # Calculate image plane corners in camera coordinates (normalized, then scaled)
-            # (u,v) -> (x_c, y_c, z_c)
-            # x_c = (u - cx) / fx * z_c
-            # y_c = (v - cy) / fy * z_c
-            # We choose z_c = plane_distance
-            
-            # Top-Left corner (0,0 pixel)
+            # These are in camera's local coordinate system, so they are not affected by EPSG scaling
             tl_cam = np.array([(0 - self.cx) / self.fx * plane_distance, (0 - self.cy) / self.fy * plane_distance, plane_distance])            
-            # Top-Right corner (width,0 pixel)
             tr_cam = np.array([(self.image_width - self.cx) / self.fx * plane_distance, (0 - self.cy) / self.fy * plane_distance, plane_distance])
-            # Bottom-Right corner (width,height pixel)
             br_cam = np.array([(self.image_width - self.cx) / self.fx * plane_distance, (self.image_height - self.cy) / self.fy * plane_distance, plane_distance])
-            # Bottom-Left corner (0,height pixel)
             bl_cam = np.array([(0 - self.cx) / self.fx * plane_distance, (self.image_height - self.cy) / self.fy * plane_distance, plane_distance])
 
-            # Transform corners from camera to world coordinates
-            R_world_camera = self.camera_rotation.T
-            T_world_camera = self.camera_position.reshape(3,1)
+            # Transform corners from camera coordinates to *world EPSG coordinates* first
+            R_world_camera = self.camera_rotation.T # Rotation from camera to world
+            T_world_camera_epsg = camera_position_epsg.reshape(3,1) # Camera center in world EPSG
 
-            self.image_plane_corners_3d = [
-                (R_world_camera @ tl_cam.reshape(3,1) + T_world_camera).flatten(),
-                (R_world_camera @ tr_cam.reshape(3,1) + T_world_camera).flatten(),
-                (R_world_camera @ br_cam.reshape(3,1) + T_world_camera).flatten(),
-                (R_world_camera @ bl_cam.reshape(3,1) + T_world_camera).flatten()
+            corners_epsg = [
+                (R_world_camera @ tl_cam.reshape(3,1) + T_world_camera_epsg).flatten(),
+                (R_world_camera @ tr_cam.reshape(3,1) + T_world_camera_epsg).flatten(),
+                (R_world_camera @ br_cam.reshape(3,1) + T_world_camera_epsg).flatten(),
+                (R_world_camera @ bl_cam.reshape(3,1) + T_world_camera_epsg).flatten()
             ]
+            
+            # Then scale these EPSG corners for display
+            self.image_plane_corners_3d = [self.scale_point_for_display(corner) for corner in corners_epsg]
 
             # Project image points onto this 3D plane
             for img_pt in self.image_points:
                 u, v = img_pt[0], img_pt[1]
                 # Convert 2D pixel to 3D point on the plane in camera coordinates
                 pt_on_plane_cam = np.array([(u - self.cx) / self.fx * plane_distance, (v - self.cy) / self.fy * plane_distance, plane_distance])
-                # Transform to world coordinates
-                self.image_plane_points_3d.append((R_world_camera @ pt_on_plane_cam.reshape(3,1) + T_world_camera).flatten())
+                
+                # Transform to world EPSG coordinates
+                pt_on_plane_epsg = (R_world_camera @ pt_on_plane_cam.reshape(3,1) + T_world_camera_epsg).flatten()
+                
+                # Then scale for display
+                self.image_plane_points_3d.append(self.scale_point_for_display(pt_on_plane_epsg))
 
         self.update()
 
 
     def set_point_count(self, n):
-        old_n = len(self.world_points)
-        
-        # Define default new point values (small scale for visualization)
-        new_3d_point = np.array([0.0, 0.0, 0.0], dtype=np.float32)
-        new_2d_point = np.array([0.0, 0.0], dtype=np.float32) # Default pixel coords
+        # This method is called by MainWindow.update_num_points_in_dialogs
+        # It's primarily for resizing the internal arrays.
+        # The actual values are managed by MainWindow and pushed via set_original_world_points etc.
+        old_n_original = len(self.original_world_points)
+        old_n_display = len(self.display_world_points)
+        old_n_image = len(self.image_points)
 
-        if n > old_n:
-            # Append dummy points if increasing size
-            self.world_points = np.append(self.world_points, np.zeros((n - old_n, 3), dtype=np.float32), axis=0)
-            self.image_points = np.append(self.image_points, np.zeros((n - old_n, 2), dtype=np.float32), axis=0)
+        # Resize original_world_points (will be filled by MainWindow)
+        if n > old_n_original:
+            self.original_world_points = np.append(self.original_world_points, np.zeros((n - old_n_original, 3), dtype=np.float64), axis=0)
         else:
-            # Truncate if decreasing size
-            self.world_points = self.world_points[:n]
+            self.original_world_points = self.original_world_points[:n]
+
+        # Resize display_world_points (will be filled by MainWindow)
+        if n > old_n_display:
+            self.display_world_points = np.append(self.display_world_points, np.zeros((n - old_n_display, 3), dtype=np.float32), axis=0)
+        else:
+            self.display_world_points = self.display_world_points[:n]
+
+        # Resize image_points (will be filled by MainWindow)
+        if n > old_n_image:
+            self.image_points = np.append(self.image_points, np.zeros((n - old_n_image, 2), dtype=np.float32), axis=0)
+        else:
             self.image_points = self.image_points[:n]
 
         self.camera_found = False # Invalidate camera pose on point count change
         self.image_plane_points_3d = [] # Clear image plane data
         self.image_plane_corners_3d = [] # Clear image plane data
-        self.update()  # trigger redraw if needed
+        self.update()
 
     def closeEvent(self, event):
         # Clean up GLU quadric object when widget is closed
@@ -540,7 +639,7 @@ class GLWidget(QGLWidget):
             gluDeleteQuadric(self.quadric)
         super().closeEvent(event)
 
-# --- Dialog Classes ---
+# --- Dialog Classes (No changes needed here, they deal with raw input) ---
 
 class IntrinsicDialog(QDialog):
     def __init__(self, fx, fy, cx, cy, img_w, img_h, parent=None):
@@ -582,10 +681,10 @@ class WorldPointsDialog(QDialog):
         self.num_points = num_points
         self.spinboxes = []
 
-        # Store the local origin for conversion
-        self.local_origin = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        # Use the first point as a reference for sensible defaults if available
+        self.default_origin = np.array([132000.0, 457000.0, 10.0], dtype=np.float64)
         if len(current_world_points_epsg) > 0:
-            self.local_origin = current_world_points_epsg[0] # Use first point as origin for display
+            self.default_origin = current_world_points_epsg[0]
 
         for i in range(self.num_points):
             x_spin = QDoubleSpinBox(); x_spin.setDecimals(2); x_spin.setRange(0.0, 300000.0); x_spin.setSingleStep(1.0)
@@ -598,9 +697,9 @@ class WorldPointsDialog(QDialog):
                 z_spin.setValue(current_world_points_epsg[i][2])
             else:
                 # Provide sensible defaults for new points in EPSG:28992 range
-                x_spin.setValue(self.local_origin[0] + (i * 0.5))
-                y_spin.setValue(self.local_origin[1] + (i * 0.5))
-                z_spin.setValue(self.local_origin[2] + (i * 0.1))
+                x_spin.setValue(self.default_origin[0] + (i * 0.5))
+                y_spin.setValue(self.default_origin[1] + (i * 0.5))
+                z_spin.setValue(self.default_origin[2] + (i * 0.1))
 
 
             self.spinboxes.append((x_spin, y_spin, z_spin))
@@ -683,20 +782,26 @@ class MainWindow(QMainWindow):
 
         # Data Storage for EPSG:28992, Intrinsics and Scale factors in visualizers
         self.current_fx, self.current_fy = 53025.0, 53025.0
-        self.current_cx, self.current_cy = 13229.5, 8501.5
-        self.current_img_w, self.current_img_h = 26459, 17003
-        self.current_world_points_epsg = np.array([[132112.24, 457626.22, 12.0], 
-                                                   [132597.84, 458475.20, 9.7], 
-                                                   [113379.34, 551897.51, 5.0]], dtype=np.float64)
-        self.current_image_points = np.array([[12578.0, 6766.0], 
-                                              [2281.0, 12643.0], 
-                                              [11409.0, 9014.0]], dtype=np.float32)
-        self.exaggerate_z = False
-        self.z_exaggeration_factor = 1.0
-        self.scale_factor = 1.0
+        self.current_cx, self.current_cy = 13200.0, 8470.0
+        self.current_img_w, self.current_img_h = 26400, 16940
+        self.current_world_points_epsg = np.array([[132597.84, 458475.208, 9.7], 
+                                                   [132335.16, 457983.606, 11.6], 
+                                                   [132277.75, 457572.218, 10.5],
+                                                   [132841.53, 457468.09, 33.0],
+                                                #    [131741.69, 458538.793, 13.4],
+                                                   [131697.88, 456621.146, 8.33]], dtype=np.float64)
+        self.current_image_points = np.array([[2281.0, 12643.0], 
+                                              [8256.0, 9466.0], 
+                                              [13229.0, 8773.0], 
+                                              [14488.0, 15641.0], 
+                                            #   [1507.0, 2272.0], 
+                                              [24753.0, 1747.0]], dtype=np.float32)
         
-        # Local origin for visualization (will be the first world point by default)
-        self.local_origin_3d = self.current_world_points_epsg[0] if len(self.current_world_points_epsg) > 0 else np.array([0.0, 0.0, 0.0])
+        # Scaling parameters for visualization
+        self.local_origin_3d = np.array([0.0, 0.0, 0.0], dtype=np.float64) # Will be set to first world point
+        self.scale_factor = 1.0 # Calculated dynamically
+        self.z_exaggeration_factor = 1000.0 # Example factor, can be adjusted
+        self.exaggerate_z = True # Toggle for Z exaggeration
 
         # --- Buttons to open dialogs ---
         data_input_group = QGroupBox("Data Input")
@@ -733,19 +838,19 @@ class MainWindow(QMainWindow):
         self.use_estimate_checkbox.stateChanged.connect(self.gl_widget.set_use_estimated_pose)
         self.estimated_pose_layout.addWidget(self.use_estimate_checkbox, 0, 0, 1, 6)
 
-        # Estimated Position
-        self.est_x_spin = QDoubleSpinBox(); self.est_x_spin.setDecimals(2); self.est_x_spin.setRange(-100.0, 100.0); self.est_x_spin.setSingleStep(1); self.est_x_spin.setValue(0.0)
-        self.est_y_spin = QDoubleSpinBox(); self.est_y_spin.setDecimals(2); self.est_y_spin.setRange(-100.0, 100.0); self.est_y_spin.setSingleStep(1); self.est_y_spin.setValue(0.0)
-        self.est_z_spin = QDoubleSpinBox(); self.est_z_spin.setDecimals(2); self.est_z_spin.setRange(-100.0, 100.0); self.est_z_spin.setSingleStep(1); self.est_z_spin.setValue(0.0)
+        # Estimated Position (in EPSG:28992 coordinates)
+        self.est_x_spin = QDoubleSpinBox(); self.est_x_spin.setDecimals(2); self.est_x_spin.setRange(0.0, 300000.0); self.est_x_spin.setSingleStep(1.0); self.est_x_spin.setValue(132252.06)
+        self.est_y_spin = QDoubleSpinBox(); self.est_y_spin.setDecimals(2); self.est_y_spin.setRange(300000.0, 650000.0); self.est_y_spin.setSingleStep(1.0); self.est_y_spin.setValue(457578.38)
+        self.est_z_spin = QDoubleSpinBox(); self.est_z_spin.setDecimals(2); self.est_z_spin.setRange(-500.0, 10000.0); self.est_z_spin.setSingleStep(0.1); self.est_z_spin.setValue(4388.13)
         
         self.estimated_pose_layout.addWidget(QLabel("Pos X:"), 1, 0); self.estimated_pose_layout.addWidget(self.est_x_spin, 1, 1)
         self.estimated_pose_layout.addWidget(QLabel("Y:"), 1, 2); self.estimated_pose_layout.addWidget(self.est_y_spin, 1, 3)
         self.estimated_pose_layout.addWidget(QLabel("Z:"), 1, 4); self.estimated_pose_layout.addWidget(self.est_z_spin, 1, 5)
 
         # Estimated Rotation (Euler angles: Roll, Pitch, Yaw in degrees)
-        self.est_roll_spin = QDoubleSpinBox(); self.est_roll_spin.setDecimals(1); self.est_roll_spin.setRange(-180.0, 180.0); self.est_roll_spin.setSingleStep(1.0); self.est_roll_spin.setValue(0.0)
-        self.est_pitch_spin = QDoubleSpinBox(); self.est_pitch_spin.setDecimals(1); self.est_pitch_spin.setRange(-180.0, 180.0); self.est_pitch_spin.setSingleStep(1.0); self.est_pitch_spin.setValue(0.0)
-        self.est_yaw_spin = QDoubleSpinBox(); self.est_yaw_spin.setDecimals(1); self.est_yaw_spin.setRange(-180.0, 180.0); self.est_yaw_spin.setSingleStep(1.0); self.est_yaw_spin.setValue(0.0)
+        self.est_roll_spin = QDoubleSpinBox(); self.est_roll_spin.setDecimals(1); self.est_roll_spin.setRange(-180.0, 180.0); self.est_roll_spin.setSingleStep(1.0); self.est_roll_spin.setValue(0.00712)
+        self.est_pitch_spin = QDoubleSpinBox(); self.est_pitch_spin.setDecimals(1); self.est_pitch_spin.setRange(-180.0, 180.0); self.est_pitch_spin.setSingleStep(1.0); self.est_pitch_spin.setValue(-0.04339)
+        self.est_yaw_spin = QDoubleSpinBox(); self.est_yaw_spin.setDecimals(1); self.est_yaw_spin.setRange(-180.0, 180.0); self.est_yaw_spin.setSingleStep(1.0); self.est_yaw_spin.setValue(-89.99288)
 
         self.estimated_pose_layout.addWidget(QLabel("Rot Roll:"), 2, 0); self.estimated_pose_layout.addWidget(self.est_roll_spin, 2, 1)
         self.estimated_pose_layout.addWidget(QLabel("Pitch:"), 2, 2); self.estimated_pose_layout.addWidget(self.est_pitch_spin, 2, 3)
@@ -768,18 +873,18 @@ class MainWindow(QMainWindow):
         # Initialize GLWidget with current data
         self.update_gl_widget_data()
         
-        # Create dropdown for PnP method selection
-        self.pnp_selector = QComboBox()
-        self.pnp_selector.addItems([
-            "SQPnP (≥3 pts)",
-            "Iterative (≥4 pts)",
-            "EPnP (≥4 pts)",
-            "UPnP (≥4 pts)",
-            "P3P (4 pts, multiple)",
-            "AP3P (4 pts, multiple)",
-            "DLS (≥6 pts)"
-        ])
-        control_layout.addWidget(self.pnp_selector)
+        # # Create dropdown for PnP method selection
+        # self.pnp_selector = QComboBox()
+        # self.pnp_selector.addItems([
+        #     "SQPnP (≥3 pts)",
+        #     "Iterative (≥4 pts)",
+        #     "EPnP (≥4 pts)",
+        #     "UPnP (≥4 pts)",
+        #     "P3P (4 pts, multiple)",
+        #     "AP3P (4 pts, multiple)",
+        #     "DLS (≥6 pts)"
+        # ])
+        # control_layout.addWidget(self.pnp_selector)
         
         # Add compute button
         compute_btn = QPushButton("Compute Camera Pose (PnP)") 
@@ -825,42 +930,105 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(control_panel, 1)
         
     def compute_camera_pose(self):
-        selected = self.pnp_selector.currentText()
-        if "SQPnP" in selected:
-            self.gl_widget.pnp_flag = cv2.SOLVEPNP_SQPNP
-        elif "Iterative" in selected:
-            self.gl_widget.pnp_flag = cv2.SOLVEPNP_ITERATIVE
-        elif "EPnP" in selected:
-            self.gl_widget.pnp_flag = cv2.SOLVEPNP_EPNP
-        elif "UPnP" in selected:
-            self.gl_widget.pnp_flag = cv2.SOLVEPNP_UPNP
-        elif "P3P" in selected:
-            self.gl_widget.pnp_flag = cv2.SOLVEPNP_P3P
-        elif "AP3P" in selected:
-            self.gl_widget.pnp_flag = cv2.SOLVEPNP_AP3P
-        elif "DLS" in selected:
-            self.gl_widget.pnp_flag = cv2.SOLVEPNP_DLS
-        else:
-            print("Unknown method selected.")
-            return
+        # selected = self.pnp_selector.currentText()
+        # if "SQPnP" in selected:
+        #     self.gl_widget.pnp_flag = cv2.SOLVEPNP_SQPNP
+        # elif "Iterative" in selected:
+        #     self.gl_widget.pnp_flag = cv2.SOLVEPNP_ITERATIVE
+        # elif "EPnP" in selected:
+        #     self.gl_widget.pnp_flag = cv2.SOLVEPNP_EPNP
+        # elif "UPnP" in selected:
+        #     self.gl_widget.pnp_flag = cv2.SOLVEPNP_UPNP
+        # elif "P3P" in selected:
+        #     self.gl_widget.pnp_flag = cv2.SOLVEPNP_P3P
+        # elif "AP3P" in selected:
+        #     self.gl_widget.pnp_flag = cv2.SOLVEPNP_AP3P
+        # elif "DLS" in selected:
+        #     self.gl_widget.pnp_flag = cv2.SOLVEPNP_DLS
+        # else:
+        #     print("Unknown method selected.")
+        #     return
 
         self.gl_widget.compute_p3p()
 
+    def calculate_and_set_scaling_params(self):
+        """Calculates the local origin and scale factor for visualization."""
+        if len(self.current_world_points_epsg) > 0:
+            self.local_origin_3d = self.current_world_points_epsg[0].copy()
+        else:
+            self.local_origin_3d = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+            self.scale_factor = 1.0
+            return # No points, no scaling needed
+
+        centered_points = self.current_world_points_epsg - self.local_origin_3d
+        
+        # Apply Z exaggeration for range calculation if enabled
+        temp_points_for_range = centered_points.copy()
+        if self.exaggerate_z:
+            temp_points_for_range[:, 2] *= self.z_exaggeration_factor
+
+        max_range = np.max(np.linalg.norm(temp_points_for_range, axis=1))
+        
+        target_display_range = 10.0 # Max extent in OpenGL view
+        if max_range < 1e-6:
+            self.scale_factor = 1.0
+        else:
+            self.scale_factor = target_display_range / max_range
+        
+        print(f"Calculated local origin: {self.local_origin_3d}")
+        print(f"Calculated scale factor: {self.scale_factor:.6f}")
+        print(f"Z Exaggeration: {self.exaggerate_z} (Factor: {self.z_exaggeration_factor})")
+
+    def scale_point_for_display(self, point_epsg):
+        """Scales a single point (or array of points) from EPSG to display coordinates."""
+        if point_epsg.ndim == 1:
+            point_epsg = point_epsg.reshape(1, 3)
+        
+        centered = point_epsg - self.local_origin_3d
+        if self.exaggerate_z:
+            centered[:, 2] *= self.z_exaggeration_factor
+        scaled = centered * self.scale_factor
+        return scaled.flatten() if point_epsg.shape[0] == 1 else scaled
+
+    def unscale_point_from_display(self, point_scaled):
+        """Unscales a single point (or array of points) from display to EPSG coordinates."""
+        if point_scaled.ndim == 1:
+            point_scaled = point_scaled.reshape(1, 3)
+
+        unscaled = point_scaled / self.scale_factor
+        if self.exaggerate_z:
+            unscaled[:, 2] /= self.z_exaggeration_factor
+        original = unscaled + self.local_origin_3d
+        return original.flatten() if point_scaled.shape[0] == 1 else original
 
     def update_num_points_in_dialogs(self, count):
-        # This updates the internal data arrays to the new size
-        # The actual values will be populated when dialogs are opened
         old_count = len(self.current_world_points_epsg)
         if count > old_count:
-            self.current_world_points_epsg = np.append(self.current_world_points_epsg, np.zeros((count - old_count, 3), dtype=np.float64), axis=0)
-            self.current_image_points = np.append(self.current_image_points, np.zeros((count - old_count, 2), dtype=np.float32), axis=0)
+            # Append dummy points if increasing size
+            if old_count > 0:
+                last_point = self.current_world_points_epsg[-1]
+                # Add small offsets to new points relative to the last one
+                new_epsg_points = np.array([last_point + [i*0.1, i*0.1, i*0.01] for i in range(1, count - old_count + 1)], dtype=np.float64)
+            else: # If no points initially, use a default EPSG origin
+                new_epsg_points = np.array([[132000.0, 457000.0, 10.0]] * (count - old_count), dtype=np.float64)
+                if count - old_count > 1: # Offset subsequent points
+                    for i in range(1, count - old_count):
+                        new_epsg_points[i] += [i*0.1, i*0.1, i*0.01]
+
+            self.current_world_points_epsg = np.append(self.current_world_points_epsg, new_epsg_points, axis=0)
+            
+            # For image points, use image center as a base
+            new_image_points = np.array([[self.current_img_w / 2 + (i * 5), self.current_img_h / 2 + (i * 5)] for i in range(count - old_count)], dtype=np.float32)
+            self.current_image_points = np.append(self.current_image_points, new_image_points, axis=0)
         else:
+            # Truncate if decreasing size
             self.current_world_points_epsg = self.current_world_points_epsg[:count]
             self.current_image_points = self.current_image_points[:count]
         
-        # Update GLWidget's internal arrays to match the new size (values will be dummy for now)
-        self.gl_widget.set_point_count(count)
-        self.status_label.setText(f"Number of points set to {count}. Open dialogs to set values.")\
+        # Update GLWidget's internal arrays to match the new size and values
+        self.gl_widget.set_point_count(count) # This resizes GLWidget's internal arrays
+        self.update_gl_widget_data() # This pushes the actual data and recalculates scaling
+        self.status_label.setText(f"Number of points set to {count}. Open dialogs to fine-tune values.")
             
     def open_intrinsics_dialog(self):
         dialog = IntrinsicDialog(self.current_fx, self.current_fy, self.current_cx, self.current_cy,
@@ -874,18 +1042,8 @@ class MainWindow(QMainWindow):
         dialog = WorldPointsDialog(self.num_points_spinbox.value(), self.current_world_points_epsg, self)
         if dialog.exec_():
             self.current_world_points_epsg = dialog.get_points()
-            # # Update local origin for visualization
-            # if len(self.current_world_points_epsg) > 0:
-            # else:
-            self.local_origin_3d = self.current_world_points_epsg[0]
-            # self.local_origin_3d = np.array([0.0, 0.0, 0.0])
-            points_3d_local = self.scale_world_points(self.current_world_points_epsg, exaggerate_z=True)
-            self.gl_widget.set_world_points(points_3d_local)
-            
-            # # Convert EPSG:28992 to local coordinates for GLWidget
-            # points_3d_local = self.current_world_points_epsg - self.local_origin_3d
-            # self.gl_widget.set_world_points(points_3d_local)
-            self.status_label.setText("World points updated (local origin set to first point).")
+            self.update_gl_widget_data() # Recalculate scaling and push to GLWidget
+            self.status_label.setText("World points updated.")
 
     def open_image_points_dialog(self):
         dialog = ImagePointsDialog(self.num_points_spinbox.value(), self.current_image_points, 
@@ -895,69 +1053,26 @@ class MainWindow(QMainWindow):
             self.gl_widget.set_image_points(self.current_image_points)
             self.status_label.setText("Image points updated.")
             
-    def scale_world_points(self, points, target_range=20.0, exaggerate_z=False, z_factor=5e3):
-        centered = points - self.local_origin_3d
-
-        self.exaggerate_z = exaggerate_z
-        self.z_exaggeration_factor = z_factor
-
-        if exaggerate_z:
-            # centered[:, 2] *= z_factor
-            centered /= z_factor
-
-        max_range = np.max(np.linalg.norm(centered, axis=1))
-        if max_range < 1e-6:
-            self.scale_factor = 1.0  # safe default
-            return centered
-
-        self.scale_factor = target_range / (2 * max_range)
-        scaled = centered * self.scale_factor
-        return scaled
-
-    def unscale_camera_position(self, scaled_pos):
-        unscaled = scaled_pos * self.scale_factor
-        if self.exaggerate_z:
-            unscaled[2] /= self.z_exaggeration_factor
-        real_world_pos = unscaled + self.local_origin_3d
-        return real_world_pos
-
     def update_gl_widget_data(self):
-        # Call this once at startup to push initial data to GLWidget
+        """Pushes all relevant data to the GLWidget."""
+        self.calculate_and_set_scaling_params() # Recalculate scaling params first
+
+        # Pass original world points for solvePnP
+        self.gl_widget.set_original_world_points(self.current_world_points_epsg)
+        
+        # Pass scaled world points for display
+        scaled_world_points = self.scale_point_for_display(self.current_world_points_epsg)
+        self.gl_widget.set_world_points_for_display(scaled_world_points)
+
+        self.gl_widget.set_image_points(self.current_image_points)
         self.gl_widget.set_intrinsic_parameters(self.current_fx, self.current_fy, self.current_cx, self.current_cy, self.current_img_w, self.current_img_h)
         
-        # # Convert initial EPSG:28992 points to local for GLWidget
-        # if len(self.current_world_points_epsg) > 0:
-        # else:
-        self.local_origin_3d = self.current_world_points_epsg[0]
-        # self.local_origin_3d = np.array([0.0, 0.0, 0.0])
-        points_3d_local = self.scale_world_points(self.current_world_points_epsg, exaggerate_z=True)
-        self.gl_widget.set_world_points(points_3d_local)
-        
-        self.gl_widget.set_image_points(self.current_image_points)
-        self.update_estimated_pose() # Also push initial estimated pose
+        # Pass scaling parameters to GLWidget for internal use (e.g., unscaling estimated pose)
+        self.gl_widget.set_scaling_params(self.local_origin_3d, self.scale_factor, self.z_exaggeration_factor, self.exaggerate_z)
 
-    def update_world_point(self, idx, axis, value):
-        if axis == 'x':
-            self.gl_widget.world_points[idx][0] = value
-        elif axis == 'y':
-            self.gl_widget.world_points[idx][1] = value
-        elif axis == 'z':
-            self.gl_widget.world_points[idx][2] = value
-        self.gl_widget.camera_found = False # Invalidate pose
-        self.gl_widget.image_plane_points_3d = [] # Clear image plane data
-        self.gl_widget.image_plane_corners_3d = [] # Clear image plane data
-        self.gl_widget.update()
+        self.update_estimated_pose() # Push initial estimated pose (in EPSG)
+        self.gl_widget.update() # Trigger redraw
 
-    def update_image_point(self, idx, axis, value):
-        if axis == 'u':
-            self.gl_widget.image_points[idx][0] = value
-        elif axis == 'v':
-            self.gl_widget.image_points[idx][1] = value
-        self.gl_widget.camera_found = False # Invalidate pose
-        self.gl_widget.image_plane_points_3d = [] # Clear image plane data
-        self.gl_widget.image_plane_corners_3d = [] # Clear image plane data
-        self.gl_widget.update()
-        
     def update_estimated_pose(self):
         x = self.est_x_spin.value()
         y = self.est_y_spin.value()
@@ -965,6 +1080,7 @@ class MainWindow(QMainWindow):
         roll = self.est_roll_spin.value()
         pitch = self.est_pitch_spin.value()
         yaw = self.est_yaw_spin.value()
+        # Pass estimated pose in original EPSG coordinates to GLWidget
         self.gl_widget.set_estimated_pose(x, y, z, roll, pitch, yaw)
     
     def toggle_option(self, option):
