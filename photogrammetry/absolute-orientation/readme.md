@@ -8,3 +8,7 @@ given a set of image points taken from 2 cameras(preferably a stereo setup), we 
 * from those points we take lets say 3/4 points and their coordinatees in the absolute(target) coordinate system. These will be our control points.
 * now using these 3/4 points in both camera c.s. and absolute c.s., we can compute the absolute orientation of the camera position and orientation.
 
+![img1](/related-images/abs-o-1.png)
+![img2](/related-images/abs-o-2.png)
+
+
