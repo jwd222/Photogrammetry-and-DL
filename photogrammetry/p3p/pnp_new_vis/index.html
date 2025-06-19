@@ -7,6 +7,8 @@
     <title>PnP Algorithm 3D Viewer (Python Backend)</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/renderers/CSS2DRenderer.js"></script>
+    <!-- STEP 1: Import OrbitControls library -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
     <style>
         body {
             margin: 0;
@@ -209,7 +211,7 @@
 
     <script>
         // --- Global Variables ---
-        let scene, camera, renderer, labelRenderer;
+        let scene, camera, renderer, labelRenderer, gridHelper, controls; // <-- Added controls
         let worldPointObjects = [], projectionLines = [], estimatedCamera, imagePlane;
         let lastSolvedPose = null;
         let orbitCenter = new THREE.Vector3(0, 0, 0);
@@ -230,8 +232,9 @@
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0x1a1a1a);
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 10000);
-            camera.up.set(0, 0, 1);
-            camera.position.set(10, 5, 10);
+
+            camera.up.set(0, 0, -1);
+            camera.position.set(10, 5, -10);
             camera.lookAt(orbitCenter);
 
             renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -254,14 +257,68 @@
             scene.add(axesHelper);
             createAxesLabels();
 
-            const gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x222222);
+            gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x222222);
             gridHelper.rotation.x = Math.PI / 2;
             scene.add(gridHelper);
 
-            addMouseControls();
+            initControls(); // <-- Replaced addMouseControls()
             createPointInputs();
             updateVisualization();
             animate();
+        }
+
+        // STEP 2: Create a new function to initialize OrbitControls
+        function initControls() {
+            controls = new THREE.OrbitControls(camera, labelRenderer.domElement);
+            controls.enableDamping = true; // Makes movement feel smoother (inertia)
+            controls.dampingFactor = 0.1;
+            controls.screenSpacePanning = false; // Prevents weird panning behavior
+            controls.mouseButtons = {
+                LEFT: THREE.MOUSE.ROTATE,
+                MIDDLE: THREE.MOUSE.DOLLY,
+                RIGHT: THREE.MOUSE.PAN
+            };
+            controls.target.copy(orbitCenter);
+            controls.object.up.set(0, 0, -1); // Ensure controls respect the inverted viewport
+
+            // --- Logic for Click-to-Center ---
+            const raycaster = new THREE.Raycaster();
+            const mouse = new THREE.Vector2();
+            let mouseDownPos = new THREE.Vector2();
+
+            labelRenderer.domElement.addEventListener('mousedown', (e) => {
+                mouseDownPos.set(e.clientX, e.clientY);
+            });
+
+            labelRenderer.domElement.addEventListener('mouseup', (e) => {
+                const dragDistance = new THREE.Vector2(e.clientX, e.clientY).distanceTo(mouseDownPos);
+
+                // Only proceed if it's a left-click and not a drag (e.g., mouse moved less than 5px)
+                if (e.button !== 0 || dragDistance > 5) return;
+
+                mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+                raycaster.setFromCamera(mouse, camera);
+
+                // First, try to intersect the grid
+                const intersects = raycaster.intersectObject(gridHelper);
+
+                if (intersects.length > 0) {
+                    // If the grid is clicked, set the new orbit target to the intersection point
+                    controls.target.copy(intersects[0].point);
+                } else {
+                    // Fallback: if empty space is clicked, intersect with a virtual plane
+                    // at the Z-level of the current target.
+                    const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -controls.target.z);
+                    const intersectionPoint = new THREE.Vector3();
+                    raycaster.ray.intersectPlane(plane, intersectionPoint);
+                    if (intersectionPoint) {
+                        controls.target.copy(intersectionPoint);
+                    }
+                }
+            });
+
+            labelRenderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
         }
 
         function createAxesLabels() {
@@ -312,7 +369,7 @@
                 const eulerDeg = data.rotation_euler_degrees;
                 lastSolvedPose = {
                     position: new THREE.Vector3().fromArray(data.camera_position),
-                    rotation: new THREE.Euler(THREE.MathUtils.degToRad(eulerDeg.roll_x), THREE.MathUtils.degToRad(eulerDeg.pitch_y), THREE.MathUtils.degToRad(eulerDeg.yaw_z), 'ZYX')
+                    rotation: new THREE.Euler(THREE.MathUtils.degToRad(eulerDeg.roll_x), THREE.MathUtils.degToRad(eulerDeg.pitch_y), THREE.MathUtils.degToRad(eulerDeg.yaw_z), 'XYZ')
                 };
                 updateResultsInfo(data);
                 updateReprojectionInfo(data);
@@ -329,6 +386,13 @@
         function updateVisualization() {
             clearSceneObjects();
             const { scaledPoints, origin, scale } = scalePointsForDisplay(worldPoints);
+
+            if (worldPoints.length > 0) {
+                const minZ = Math.min(...worldPoints.map(p => p[2]));
+                const groundLevel = (minZ - origin.z) * scale;
+                gridHelper.position.z = groundLevel;
+            }
+
             if (document.getElementById('showPoints').checked) {
                 const pointMaterial = new THREE.MeshLambertMaterial({ color: 0xff4444 });
                 const pointGeometry = new THREE.SphereGeometry(0.2, 16, 16);
@@ -370,20 +434,17 @@
             camGroup.position.copy(scaledCameraPos);
             camGroup.setRotationFromEuler(pose.rotation);
 
-            // **NEW**: This is the crucial fix. We apply a 180-degree rotation on the Y-axis
-            // to flip the camera model from a "-Z look-at" to a "+Z look-at" convention.
-            camGroup.rotateY(Math.PI);
+            camGroup.rotateX(Math.PI);
 
             const h = frustumDepth;
             const w = h * aspect;
 
-            // **MODIFIED**: The local model now points along +Z, as the group's rotation will handle the flip.
             const vertices = [
-                new THREE.Vector3(0, 0, 0), new THREE.Vector3(-w / 2, -h / 2, h),
-                new THREE.Vector3(w / 2, -h / 2, h), new THREE.Vector3(w / 2, h / 2, h),
-                new THREE.Vector3(-w / 2, h / 2, h)
+                new THREE.Vector3(0, 0, 0), new THREE.Vector3(-w / 2, -h / 2, -h),
+                new THREE.Vector3(w / 2, -h / 2, -h), new THREE.Vector3(w / 2, h / 2, -h),
+                new THREE.Vector3(-w / 2, h / 2, -h)
             ];
-            const indices = [0, 2, 1, 0, 3, 2, 0, 4, 3, 0, 1, 4, 1, 2, 3, 1, 3, 4];
+            const indices = [0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 1, 1, 3, 2, 1, 4, 3];
 
             const geometry = new THREE.BufferGeometry().setFromPoints(vertices);
             geometry.setIndex(indices);
@@ -402,7 +463,6 @@
         function createAxesMarkers(length) {
             const axesGroup = new THREE.Group();
             const colors = { x: 0xff0000, y: 0x00ff00, z: 0x0000ff };
-            // **MODIFIED**: The local Z-axis marker now points along +Z.
             const dirs = { x: new THREE.Vector3(length, 0, 0), y: new THREE.Vector3(0, length, 0), z: new THREE.Vector3(0, 0, length) };
 
             for (const axis in colors) {
@@ -423,17 +483,16 @@
         }
 
         function createImagePlane(pose, origin, scale) {
-            const planeDist = 2.5;
+            const planeDist = 1000;
             const planeSize = 4;
 
             const cameraWorldPos = pose.position.clone();
             const cameraQuaternion = new THREE.Quaternion().setFromEuler(pose.rotation);
 
-            // **MODIFIED**: The forward direction is now along the FLIPPED Z-axis.
-            // We get the camera's world matrix and extract the Z column, which represents its forward direction after all rotations.
-            const worldMatrix = new THREE.Matrix4().compose(cameraWorldPos, cameraQuaternion, new THREE.Vector3(1, 1, 1));
-            worldMatrix.rotateY(Math.PI); // Apply the same flip as the camera model
-            const forwardDirection = new THREE.Vector3().setFromMatrixColumn(worldMatrix, 2);
+            const fixQuaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI);
+            const finalQuaternion = new THREE.Quaternion().multiplyQuaternions(cameraQuaternion, fixQuaternion);
+
+            const forwardDirection = new THREE.Vector3(0, 0, -1).applyQuaternion(finalQuaternion);
 
             const planeCenterWorld = cameraWorldPos.clone().add(forwardDirection.multiplyScalar(planeDist));
 
@@ -441,9 +500,8 @@
             const planeMat = new THREE.MeshBasicMaterial({ color: 0x4444ff, transparent: true, opacity: 0.2, side: THREE.DoubleSide });
             imagePlane = new THREE.Mesh(planeGeom, planeMat);
 
-            imagePlane.position.copy(planeCenterWorld);
-            imagePlane.quaternion.copy(cameraQuaternion).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI)); // Apply the same flip
-            imagePlane.position.sub(origin).multiplyScalar(scale);
+            imagePlane.position.copy(planeCenterWorld.clone().sub(origin).multiplyScalar(scale));
+            imagePlane.quaternion.copy(finalQuaternion);
             scene.add(imagePlane);
 
             const worldPlaneNormal = forwardDirection.clone();
@@ -483,7 +541,7 @@
 
         function updateResultsInfo(data) {
             const pos = data.camera_position; const rot = data.rotation_euler_degrees;
-            document.getElementById('results-info').textContent = `--- Camera Pose (World Coords) ---\nPosition:\n  X: ${pos[0].toFixed(3)}\n  Y: ${pos[1].toFixed(3)}\n  Z: ${pos[2].toFixed(3)}\n\nRotation (Euler ZYX, degrees):\n  Yaw(Z):   ${rot.yaw_z.toFixed(4)}°\n  Pitch(Y): ${rot.pitch_y.toFixed(4)}°\n  Roll(X):  ${rot.roll_x.toFixed(4)}°`;
+            document.getElementById('results-info').textContent = `--- Camera Pose (World Coords) ---\nPosition:\n  X: ${pos[0].toFixed(3)}\n  Y: ${pos[1].toFixed(3)}\n  Z: ${pos[2].toFixed(3)}\n\nRotation (Euler ZYX extrinsic, deg):\n  Yaw(Z):   ${rot.yaw_z.toFixed(4)}°\n  Pitch(Y): ${rot.pitch_y.toFixed(4)}°\n  Roll(X):  ${rot.roll_x.toFixed(4)}°`;
         }
 
         function updateReprojectionInfo(data) {
@@ -500,6 +558,10 @@
             [...worldPointObjects, ...projectionLines].forEach(obj => scene.remove(obj));
             if (estimatedCamera) scene.remove(estimatedCamera);
             if (imagePlane) scene.remove(imagePlane);
+
+            if (gridHelper) {
+                gridHelper.position.z = 0;
+            }
 
             const labelsToRemove = [];
             scene.traverse(obj => {
@@ -518,62 +580,25 @@
 
         function resetView() {
             orbitCenter.set(0, 0, 0);
-            camera.position.set(10, 5, 10);
+            camera.position.set(10, 5, -10);
+            // STEP 3: Also reset the controls' target
+            if (controls) {
+                controls.target.copy(orbitCenter);
+            }
             camera.lookAt(orbitCenter);
         }
 
         function animate() {
             requestAnimationFrame(animate);
+            // STEP 4: Update controls in the animation loop for smooth damping
+            if (controls) {
+                controls.update();
+            }
             renderer.render(scene, camera);
             labelRenderer.render(scene, camera);
         }
 
-        function addMouseControls() {
-            let isMouseDown = false, mouseX = 0, mouseY = 0;
-            const domElement = labelRenderer.domElement;
-
-            domElement.addEventListener('mousedown', e => { isMouseDown = true; mouseX = e.clientX; mouseY = e.clientY; });
-            domElement.addEventListener('mouseup', () => isMouseDown = false);
-            domElement.addEventListener('mouseleave', () => isMouseDown = false);
-
-            domElement.addEventListener('mousemove', e => {
-                if (!isMouseDown) return;
-
-                const deltaX = e.clientX - mouseX;
-                const deltaY = e.clientY - mouseY;
-                mouseX = e.clientX;
-                mouseY = e.clientY;
-
-                if (e.buttons === 4) { // Middle mouse button
-                    const panSpeed = 0.01;
-                    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
-                    const up = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
-                    const panVector = right.multiplyScalar(-deltaX * panSpeed).add(up.multiplyScalar(deltaY * panSpeed));
-
-                    camera.position.add(panVector);
-                    orbitCenter.add(panVector);
-                }
-                else if (e.buttons === 1) { // Left mouse button
-                    const offset = camera.position.clone().sub(orbitCenter);
-                    const spherical = new THREE.Spherical().setFromVector3(offset);
-
-                    spherical.theta -= deltaX * 0.005;
-                    spherical.phi -= deltaY * 0.005;
-                    spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi));
-
-                    offset.setFromSpherical(spherical);
-                    camera.position.copy(orbitCenter).add(offset);
-                }
-                camera.lookAt(orbitCenter);
-            });
-
-            domElement.addEventListener('wheel', e => {
-                const zoomFactor = e.deltaY > 0 ? 1.1 : 0.9;
-                const offset = camera.position.clone().sub(orbitCenter);
-                offset.multiplyScalar(zoomFactor);
-                camera.position.copy(orbitCenter).add(offset);
-            });
-        }
+        // The old addMouseControls function is no longer needed and can be deleted.
 
         window.addEventListener('resize', () => {
             camera.aspect = window.innerWidth / window.innerHeight;
