@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>PnP Visualizer with Three.js</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: sans-serif;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #ui-panel {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            border-radius: 5px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
+        h3 {
+            margin-top: 0;
+        }
+
+        textarea {
+            width: 300px;
+            height: 100px;
+            font-family: monospace;
+        }
+
+        input {
+            width: 80px;
+        }
+
+        .point-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+    </style>
+
+    <!-- ================================================== -->
+    <!-- NEW: Add an Import Map                           -->
+    <!-- This tells the browser where to find the modules -->
+    <!-- ================================================== -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "/static/three.module.min.js",
+            "three/addons/": "/static/"
+        }
+    }
+    </script>
+
+</head>
+
+<body>
+
+    <div id="ui-panel">
+        <h3>PnP Visualizer</h3>
+
+        <div>
+            <h4>Camera Intrinsics</h4>
+            fx: <input type="number" id="fx" value="800">
+            fy: <input type="number" id="fy" value="800"> <br>
+            cx: <input type="number" id="cx" value="512">
+            cy: <input type="number" id="cy" value="384">
+        </div>
+
+        <div>
+            <h4>World Points (X,Y,Z)</h4>
+            <textarea id="world-points">
+10, 0, 5
+10, 0, -5
+-10, 0, 5
+-10, 0, -5
+0, 10, 0
+            </textarea>
+        </div>
+
+        <div>
+            <h4>Image Points (u,v)</h4>
+            <textarea id="image-points">
+412, 284
+612, 284
+412, 484
+612, 484
+512, 384
+            </textarea>
+        </div>
+
+        <button id="compute-btn">Compute Camera Pose</button>
+        <div id="results"></div>
+    </div>
+
+    <!-- ================================================== -->
+    <!-- CHANGED: The main script tag is now type="module"  -->
+    <!-- ================================================== -->
+    <script type="module">
+
+        // ==================================================
+        // NEW: Import the libraries instead of using a global
+        // ==================================================
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/OrbitControls.js';
+
+
+        // --- THREE.JS SCENE SETUP (this code is the same) ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x222222);
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // Controls
+        const controls = new OrbitControls(camera, renderer.domElement);
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(5, 10, 7);
+        scene.add(directionalLight);
+
+        // Helpers
+        const axesHelper = new THREE.AxesHelper(5);
+        scene.add(axesHelper);
+        const gridHelper = new THREE.GridHelper(50, 50);
+        scene.add(gridHelper);
+
+        camera.position.set(15, 15, 15);
+        camera.lookAt(0, 0, 0);
+
+        // Scene objects that we will update
+        let worldPointsGroup = new THREE.Group();
+        scene.add(worldPointsGroup);
+
+        let cameraHelper = new THREE.CameraHelper(new THREE.PerspectiveCamera(45, 1.33, 2, 5));
+        cameraHelper.visible = false;
+        scene.add(cameraHelper);
+
+        // --- UI & API LOGIC (this code is the same) ---
+        const computeBtn = document.getElementById('compute-btn');
+        const resultsDiv = document.getElementById('results');
+
+        computeBtn.addEventListener('click', async () => {
+            console.log('Compute button clicked');
+
+
+            // 1. Gather data from HTML inputs
+            const worldPointsRaw = document.getElementById('world-points').value.trim().split('\n');
+            const imagePointsRaw = document.getElementById('image-points').value.trim().split('\n');
+
+            const worldPoints = worldPointsRaw.map(line => line.split(/[ ,]+/).map(Number));
+            const imagePoints = imagePointsRaw.map(line => line.split(/[ ,]+/).map(Number));
+
+            const intrinsics = {
+                fx: parseFloat(document.getElementById('fx').value),
+                fy: parseFloat(document.getElementById('fy').value),
+                cx: parseFloat(document.getElementById('cx').value),
+                cy: parseFloat(document.getElementById('cy').value)
+            };
+
+            const payload = {
+                world_points: worldPoints,
+                image_points: imagePoints,
+                intrinsics: intrinsics
+            };
+
+            // 2. Send data to Python server via Fetch API
+            try {
+                const response = await fetch('http://127.0.0.1:5000/compute-pnp', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const data = await response.json();
+
+                if (data.error) {
+                    resultsDiv.innerHTML = `<p style="color: red;">Error: ${data.error}</p>`;
+                    return;
+                }
+
+                resultsDiv.innerHTML = `<p>Success! Mean Reprojection Error: ${data.mean_reprojection_error.toFixed(2)}px</p>`;
+
+                // 3. Update Three.js scene with results
+                updateScene(data, worldPoints);
+
+            } catch (error) {
+                console.error('Error:', error);
+                resultsDiv.innerHTML = `<p style="color: red;">Failed to connect to the server. Is server.py running?</p>`;
+            }
+        });
+
+        function updateScene(data, points) {
+            // Clear previous points
+            while (worldPointsGroup.children.length > 0) {
+                worldPointsGroup.remove(worldPointsGroup.children[0]);
+            }
+
+            // Create new world points
+            const pointGeometry = new THREE.SphereGeometry(0.2, 16, 16);
+            const pointMaterial = new THREE.MeshStandardMaterial({ color: 0xffa500 });
+            points.forEach(p => {
+                const sphere = new THREE.Mesh(pointGeometry, pointMaterial);
+                sphere.position.set(p[0], p[1], p[2]);
+                worldPointsGroup.add(sphere);
+            });
+
+            // Update the camera helper to represent the calculated pose
+            const pos = data.camera_pose.position;
+            const rotMatrix = data.camera_pose.rotation_matrix;
+
+            // Create a THREE.Matrix4 from the Python list of lists
+            const threeMatrix = new THREE.Matrix4();
+            threeMatrix.set(
+                rotMatrix[0][0], rotMatrix[0][1], rotMatrix[0][2], pos[0],
+                rotMatrix[1][0], rotMatrix[1][1], rotMatrix[1][2], pos[1],
+                rotMatrix[2][0], rotMatrix[2][1], rotMatrix[2][2], pos[2],
+                0, 0, 0, 1
+            );
+
+            // Apply this world matrix to the camera helper
+            cameraHelper.matrix.copy(threeMatrix);
+            cameraHelper.matrixAutoUpdate = false; // Important! We are setting matrix manually
+            cameraHelper.visible = true;
+        }
+
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+    </script>
+</body>
+
+</html>
