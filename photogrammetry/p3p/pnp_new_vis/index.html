@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PnP Algorithm 3D Viewer (Python Backend)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/renderers/CSS2DRenderer.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #1a1a1a;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            overflow: hidden;
+        }
+
+        #container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        .panel {
+            position: absolute;
+            top: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border-radius: 10px;
+            color: white;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            max-height: 95vh;
+            overflow-y: auto;
+        }
+
+        #controls {
+            left: 10px;
+            width: 380px;
+        }
+
+        #info {
+            right: 10px;
+            width: 400px;
+        }
+
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            padding: 10px 15px;
+            margin: 5px;
+            border-radius: 5px;
+            color: white;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.3s ease;
+            width: calc(100% - 10px);
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .input-group {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 5px;
+            padding: 10px;
+            margin-bottom: 10px;
+        }
+
+        .point-input,
+        .param-input {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            padding: 5px;
+            margin: 2px;
+            border-radius: 3px;
+            color: white;
+            width: 70px;
+        }
+
+        .point-row {
+            margin: 5px 0;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 14px;
+        }
+
+        .info-section {
+            font-family: monospace;
+            font-size: 12px;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+            white-space: pre-wrap;
+        }
+
+        h3,
+        h4 {
+            margin-top: 0;
+            color: #667eea;
+            border-bottom: 1px solid #667eea33;
+            padding-bottom: 5px;
+        }
+
+        .status {
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+            text-align: center;
+        }
+
+        .status.success {
+            background: rgba(76, 175, 80, 0.2);
+            border: 1px solid rgba(76, 175, 80, 0.5);
+        }
+
+        .status.error {
+            background: rgba(244, 67, 54, 0.2);
+            border: 1px solid rgba(244, 67, 54, 0.5);
+        }
+
+        .status.loading {
+            background: rgba(255, 152, 0, 0.2);
+            border: 1px solid rgba(255, 152, 0, 0.5);
+        }
+
+        .toggle-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin: 5px 0;
+        }
+
+        .label {
+            color: #FFF;
+            font-family: sans-serif;
+            padding: 2px;
+            background: rgba(0, 0, 0, 0.6);
+            border-radius: 2px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="container"></div>
+    <div id="controls" class="panel">
+        <h3>PnP Controls</h3>
+        <div id="status">
+            <div class="status success">Ready.</div>
+        </div>
+        <div class="input-group">
+            <h4>World Points (3D)</h4>
+            <div id="world-points-container"></div>
+        </div>
+        <div class="input-group">
+            <h4>Image Points (2D Pixels)</h4>
+            <div id="image-points-container"></div>
+        </div>
+        <div class="input-group">
+            <h4>Camera Intrinsics</h4>
+            <div class="point-row">fx: <input type="number" class="param-input" id="fx" value="53025.0" step="10"></div>
+            <div class="point-row">fy: <input type="number" class="param-input" id="fy" value="53025.0" step="10"></div>
+            <div class="point-row">cx: <input type="number" class="param-input" id="cx" value="13200.0" step="1"></div>
+            <div class="point-row">cy: <input type="number" class="param-input" id="cy" value="8470.0" step="1"></div>
+            <div class="point-row">Img W: <input type="number" class="param-input" id="imgW" value="26400" step="10">
+            </div>
+            <div class="point-row">Img H: <input type="number" class="param-input" id="imgH" value="16940" step="10">
+            </div>
+        </div>
+        <div class="input-group">
+            <h4>Solver Options (RANSAC)</h4>
+            <div class="point-row">Reproj. Err: <input type="number" class="param-input" id="reprojErr" value="5.0"
+                    step="0.1"></div>
+            <div class="point-row">Iterations: <input type="number" class="param-input" id="iterations" value="100"
+                    step="10"></div>
+        </div>
+        <div class="input-group">
+            <h4>Visualization Toggles</h4>
+            <div class="toggle-row"><label for="showCamera">Show Camera</label><input type="checkbox" id="showCamera"
+                    checked onchange="updateVisualization()"></div>
+            <div class="toggle-row"><label for="showRays">Show Rays</label><input type="checkbox" id="showRays" checked
+                    onchange="updateVisualization()"></div>
+            <div class="toggle-row"><label for="showPoints">Show World Points</label><input type="checkbox"
+                    id="showPoints" checked onchange="updateVisualization()"></div>
+            <div class="toggle-row"><label for="showImagePlane">Show Image Plane</label><input type="checkbox"
+                    id="showImagePlane" checked onchange="updateVisualization()"></div>
+        </div>
+        <button onclick="solvePnP()" id="solveBtn">Solve PnP</button>
+        <button onclick="resetView()">Reset View</button>
+    </div>
+    <div id="info" class="panel">
+        <h3>PnP Results</h3>
+        <div id="results-info" class="info-section">Ready to solve...</div>
+        <div id="reprojection-info" class="info-section">Reprojection errors will appear here.</div>
+    </div>
+
+    <script>
+        // --- Global Variables ---
+        let scene, camera, renderer, labelRenderer;
+        let worldPointObjects = [], projectionLines = [], estimatedCamera, imagePlane;
+        let lastSolvedPose = null;
+        let orbitCenter = new THREE.Vector3(0, 0, 0);
+
+        let worldPoints = [
+            [132597.84, 458475.208, 9.7], [132335.16, 457983.606, 11.6],
+            [132277.75, 457572.218, 10.5], [132841.53, 457468.09, 33.0],
+            [131697.88, 456621.146, 8.33]
+        ];
+        let imagePoints = [
+            [2281.0, 12643.0], [8256.0, 9466.0], [13229.0, 8773.0],
+            [14488.0, 15641.0], [24753.0, 1747.0]
+        ];
+
+        // --- Core three.js and App Logic ---
+        function init() {
+            THREE.Object3D.DefaultUp.set(0, 0, 1);
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x1a1a1a);
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 10000);
+            camera.up.set(0, 0, 1);
+            camera.position.set(10, 5, 10);
+            camera.lookAt(orbitCenter);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.getElementById('container').appendChild(renderer.domElement);
+
+            labelRenderer = new THREE.CSS2DRenderer();
+            labelRenderer.setSize(window.innerWidth, window.innerHeight);
+            labelRenderer.domElement.style.position = 'absolute';
+            labelRenderer.domElement.style.top = '0px';
+            document.getElementById('container').appendChild(labelRenderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(20, 30, 50);
+            scene.add(directionalLight);
+
+            const axesHelper = new THREE.AxesHelper(5);
+            scene.add(axesHelper);
+            createAxesLabels();
+
+            const gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x222222);
+            gridHelper.rotation.x = Math.PI / 2;
+            scene.add(gridHelper);
+
+            addMouseControls();
+            createPointInputs();
+            updateVisualization();
+            animate();
+        }
+
+        function createAxesLabels() {
+            const axisLength = 5.2;
+            const labels = { 'X': [axisLength, 0, 0], 'Y': [0, axisLength, 0], 'Z': [0, 0, axisLength] };
+            for (const text in labels) {
+                const div = document.createElement('div');
+                div.className = 'label';
+                div.textContent = text;
+                const label = new THREE.CSS2DObject(div);
+                label.position.fromArray(labels[text]);
+                scene.add(label);
+            }
+        }
+
+        function createPointInputs() {
+            const wpContainer = document.getElementById('world-points-container');
+            const ipContainer = document.getElementById('image-points-container');
+            wpContainer.innerHTML = ''; ipContainer.innerHTML = '';
+            for (let i = 0; i < worldPoints.length; i++) {
+                wpContainer.innerHTML += `<div class="point-row">P${i + 1}: X:<input type="number" class="point-input" id="p${i}x" value="${worldPoints[i][0]}" step="0.1"> Y:<input type="number" class="point-input" id="p${i}y" value="${worldPoints[i][1]}" step="0.1"> Z:<input type="number" class="point-input" id="p${i}z" value="${worldPoints[i][2]}" step="0.1"></div>`;
+                ipContainer.innerHTML += `<div class="point-row">p${i + 1}: U:<input type="number" class="point-input" id="i${i}x" value="${imagePoints[i][0]}" step="1"> V:<input type="number" class="point-input" id="i${i}y" value="${imagePoints[i][1]}" step="1"></div>`;
+            }
+        }
+
+        function readInputs() {
+            let newWorldPoints = [], newImagePoints = [];
+            for (let i = 0; i < worldPoints.length; i++) {
+                newWorldPoints.push([parseFloat(document.getElementById(`p${i}x`).value), parseFloat(document.getElementById(`p${i}y`).value), parseFloat(document.getElementById(`p${i}z`).value)]);
+                newImagePoints.push([parseFloat(document.getElementById(`i${i}x`).value), parseFloat(document.getElementById(`i${i}y`).value)]);
+            }
+            worldPoints = newWorldPoints; imagePoints = newImagePoints;
+        }
+
+        async function solvePnP() {
+            readInputs();
+            updateStatus('Sending data to Python backend...', 'loading');
+            const payload = {
+                worldPoints: worldPoints, imagePoints: imagePoints,
+                intrinsics: { fx: parseFloat(document.getElementById('fx').value), fy: parseFloat(document.getElementById('fy').value), cx: parseFloat(document.getElementById('cx').value), cy: parseFloat(document.getElementById('cy').value) },
+                solverOptions: { reprojErr: parseFloat(document.getElementById('reprojErr').value), iterations: parseInt(document.getElementById('iterations').value) }
+            };
+            try {
+                const response = await fetch('http://127.0.0.1:5000/solve_pnp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || `Server responded with status ${response.status}`);
+
+                const eulerDeg = data.rotation_euler_degrees;
+                lastSolvedPose = {
+                    position: new THREE.Vector3().fromArray(data.camera_position),
+                    rotation: new THREE.Euler(THREE.MathUtils.degToRad(eulerDeg.roll_x), THREE.MathUtils.degToRad(eulerDeg.pitch_y), THREE.MathUtils.degToRad(eulerDeg.yaw_z), 'ZYX')
+                };
+                updateResultsInfo(data);
+                updateReprojectionInfo(data);
+                updateVisualization();
+                updateStatus('PnP solved successfully!', 'success');
+            } catch (error) {
+                console.error('Error solving PnP:', error);
+                updateStatus(`Error: ${error.message}`, 'error');
+                lastSolvedPose = null;
+                updateVisualization();
+            }
+        }
+
+        function updateVisualization() {
+            clearSceneObjects();
+            const { scaledPoints, origin, scale } = scalePointsForDisplay(worldPoints);
+            if (document.getElementById('showPoints').checked) {
+                const pointMaterial = new THREE.MeshLambertMaterial({ color: 0xff4444 });
+                const pointGeometry = new THREE.SphereGeometry(0.2, 16, 16);
+                scaledPoints.forEach(p => {
+                    const sphere = new THREE.Mesh(pointGeometry, pointMaterial);
+                    sphere.position.copy(p);
+                    scene.add(sphere);
+                    worldPointObjects.push(sphere);
+                });
+            }
+            if (lastSolvedPose) {
+                const pose = lastSolvedPose;
+                const scaledCameraPos = pose.position.clone().sub(origin).multiplyScalar(scale);
+                if (document.getElementById('showCamera').checked) {
+                    estimatedCamera = createCameraFrustum(pose, origin, scale);
+                    scene.add(estimatedCamera);
+                }
+                if (document.getElementById('showRays').checked) {
+                    const lineMaterial = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 });
+                    scaledPoints.forEach(p => {
+                        const geometry = new THREE.BufferGeometry().setFromPoints([scaledCameraPos, p]);
+                        const line = new THREE.Line(geometry, lineMaterial);
+                        scene.add(line);
+                        projectionLines.push(line);
+                    });
+                }
+                if (document.getElementById('showImagePlane').checked) {
+                    createImagePlane(pose, origin, scale);
+                }
+            }
+        }
+
+        function createCameraFrustum(pose, origin, scale) {
+            const frustumDepth = 1.5;
+            const aspect = 4 / 3;
+
+            const camGroup = new THREE.Group();
+            const scaledCameraPos = pose.position.clone().sub(origin).multiplyScalar(scale);
+            camGroup.position.copy(scaledCameraPos);
+            camGroup.setRotationFromEuler(pose.rotation);
+
+            // **NEW**: This is the crucial fix. We apply a 180-degree rotation on the Y-axis
+            // to flip the camera model from a "-Z look-at" to a "+Z look-at" convention.
+            camGroup.rotateY(Math.PI);
+
+            const h = frustumDepth;
+            const w = h * aspect;
+
+            // **MODIFIED**: The local model now points along +Z, as the group's rotation will handle the flip.
+            const vertices = [
+                new THREE.Vector3(0, 0, 0), new THREE.Vector3(-w / 2, -h / 2, h),
+                new THREE.Vector3(w / 2, -h / 2, h), new THREE.Vector3(w / 2, h / 2, h),
+                new THREE.Vector3(-w / 2, h / 2, h)
+            ];
+            const indices = [0, 2, 1, 0, 3, 2, 0, 4, 3, 0, 1, 4, 1, 2, 3, 1, 3, 4];
+
+            const geometry = new THREE.BufferGeometry().setFromPoints(vertices);
+            geometry.setIndex(indices);
+
+            const material = new THREE.MeshBasicMaterial({ color: 0xffaa00, wireframe: true });
+
+            const frustumMesh = new THREE.Mesh(geometry, material);
+            camGroup.add(frustumMesh);
+
+            const axesMarkers = createAxesMarkers(1.0);
+            camGroup.add(axesMarkers);
+
+            return camGroup;
+        }
+
+        function createAxesMarkers(length) {
+            const axesGroup = new THREE.Group();
+            const colors = { x: 0xff0000, y: 0x00ff00, z: 0x0000ff };
+            // **MODIFIED**: The local Z-axis marker now points along +Z.
+            const dirs = { x: new THREE.Vector3(length, 0, 0), y: new THREE.Vector3(0, length, 0), z: new THREE.Vector3(0, 0, length) };
+
+            for (const axis in colors) {
+                const material = new THREE.LineBasicMaterial({ color: colors[axis] });
+                const geometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), dirs[axis]]);
+                const line = new THREE.Line(geometry, material);
+                axesGroup.add(line);
+
+                const div = document.createElement('div');
+                div.className = 'label';
+                div.textContent = axis.toUpperCase();
+                div.style.color = `rgb(${(colors[axis] >> 16) & 255}, ${(colors[axis] >> 8) & 255}, ${colors[axis] & 255})`;
+                const label = new THREE.CSS2DObject(div);
+                label.position.copy(dirs[axis]).multiplyScalar(1.1);
+                axesGroup.add(label);
+            }
+            return axesGroup;
+        }
+
+        function createImagePlane(pose, origin, scale) {
+            const planeDist = 2.5;
+            const planeSize = 4;
+
+            const cameraWorldPos = pose.position.clone();
+            const cameraQuaternion = new THREE.Quaternion().setFromEuler(pose.rotation);
+
+            // **MODIFIED**: The forward direction is now along the FLIPPED Z-axis.
+            // We get the camera's world matrix and extract the Z column, which represents its forward direction after all rotations.
+            const worldMatrix = new THREE.Matrix4().compose(cameraWorldPos, cameraQuaternion, new THREE.Vector3(1, 1, 1));
+            worldMatrix.rotateY(Math.PI); // Apply the same flip as the camera model
+            const forwardDirection = new THREE.Vector3().setFromMatrixColumn(worldMatrix, 2);
+
+            const planeCenterWorld = cameraWorldPos.clone().add(forwardDirection.multiplyScalar(planeDist));
+
+            const planeGeom = new THREE.PlaneGeometry(planeSize * (4 / 3), planeSize);
+            const planeMat = new THREE.MeshBasicMaterial({ color: 0x4444ff, transparent: true, opacity: 0.2, side: THREE.DoubleSide });
+            imagePlane = new THREE.Mesh(planeGeom, planeMat);
+
+            imagePlane.position.copy(planeCenterWorld);
+            imagePlane.quaternion.copy(cameraQuaternion).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI)); // Apply the same flip
+            imagePlane.position.sub(origin).multiplyScalar(scale);
+            scene.add(imagePlane);
+
+            const worldPlaneNormal = forwardDirection.clone();
+            const imagePlane3D = new THREE.Plane().setFromNormalAndCoplanarPoint(worldPlaneNormal, planeCenterWorld);
+
+            const pointMaterial = new THREE.MeshBasicMaterial({ color: 0xff00ff });
+            const pointGeometry = new THREE.SphereGeometry(0.08, 8, 8);
+
+            worldPoints.forEach(wpArray => {
+                const worldPoint = new THREE.Vector3().fromArray(wpArray);
+                const ray = new THREE.Ray(cameraWorldPos, worldPoint.clone().sub(cameraWorldPos).normalize());
+                const intersectionPoint = new THREE.Vector3();
+                ray.intersectPlane(imagePlane3D, intersectionPoint);
+
+                if (intersectionPoint) {
+                    const scaledIntersection = intersectionPoint.clone().sub(origin).multiplyScalar(scale);
+                    const sphere = new THREE.Mesh(pointGeometry, pointMaterial);
+                    sphere.position.copy(scaledIntersection);
+                    scene.add(sphere);
+                    worldPointObjects.push(sphere);
+                }
+            });
+        }
+
+        function scalePointsForDisplay(points) {
+            if (points.length === 0) return { scaledPoints: [], origin: new THREE.Vector3(), scale: 1 };
+            const vectors = points.map(p => new THREE.Vector3(p[0], p[1], p[2]));
+            const origin = vectors[0].clone();
+            const centeredPoints = vectors.map(p => p.clone().sub(origin));
+            let maxRange = 0;
+            centeredPoints.forEach(p => { maxRange = Math.max(maxRange, p.length()); });
+            const targetDisplayRange = 10.0;
+            const scale = (maxRange < 1e-6) ? 1.0 : targetDisplayRange / maxRange;
+            const scaledPoints = centeredPoints.map(p => p.multiplyScalar(scale));
+            return { scaledPoints, origin, scale };
+        }
+
+        function updateResultsInfo(data) {
+            const pos = data.camera_position; const rot = data.rotation_euler_degrees;
+            document.getElementById('results-info').textContent = `--- Camera Pose (World Coords) ---\nPosition:\n  X: ${pos[0].toFixed(3)}\n  Y: ${pos[1].toFixed(3)}\n  Z: ${pos[2].toFixed(3)}\n\nRotation (Euler ZYX, degrees):\n  Yaw(Z):   ${rot.yaw_z.toFixed(4)}°\n  Pitch(Y): ${rot.pitch_y.toFixed(4)}°\n  Roll(X):  ${rot.roll_x.toFixed(4)}°`;
+        }
+
+        function updateReprojectionInfo(data) {
+            let reprojectionInfo = "--- Reprojection Errors ---\n";
+            data.reprojection_errors.forEach((error, i) => {
+                const inlierStatus = data.inliers.includes(i) ? "(inlier)" : "(outlier)";
+                reprojectionInfo += `P${i + 1}: ${error.toFixed(2)}px ${inlierStatus}\n`;
+            });
+            reprojectionInfo += `\nMean Error: ${data.mean_reprojection_error.toFixed(2)}px`;
+            document.getElementById('reprojection-info').textContent = reprojectionInfo;
+        }
+
+        function clearSceneObjects() {
+            [...worldPointObjects, ...projectionLines].forEach(obj => scene.remove(obj));
+            if (estimatedCamera) scene.remove(estimatedCamera);
+            if (imagePlane) scene.remove(imagePlane);
+
+            const labelsToRemove = [];
+            scene.traverse(obj => {
+                if (obj.isCSS2DObject) {
+                    if (['X', 'Y', 'Z'].indexOf(obj.element.textContent) === -1) {
+                        labelsToRemove.push(obj);
+                    }
+                }
+            });
+            labelsToRemove.forEach(label => { label.parent.remove(label); });
+
+            worldPointObjects = []; projectionLines = []; estimatedCamera = null; imagePlane = null;
+        }
+
+        function updateStatus(message, type) { document.getElementById('status').innerHTML = `<div class="status ${type}">${message}</div>`; }
+
+        function resetView() {
+            orbitCenter.set(0, 0, 0);
+            camera.position.set(10, 5, 10);
+            camera.lookAt(orbitCenter);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+            labelRenderer.render(scene, camera);
+        }
+
+        function addMouseControls() {
+            let isMouseDown = false, mouseX = 0, mouseY = 0;
+            const domElement = labelRenderer.domElement;
+
+            domElement.addEventListener('mousedown', e => { isMouseDown = true; mouseX = e.clientX; mouseY = e.clientY; });
+            domElement.addEventListener('mouseup', () => isMouseDown = false);
+            domElement.addEventListener('mouseleave', () => isMouseDown = false);
+
+            domElement.addEventListener('mousemove', e => {
+                if (!isMouseDown) return;
+
+                const deltaX = e.clientX - mouseX;
+                const deltaY = e.clientY - mouseY;
+                mouseX = e.clientX;
+                mouseY = e.clientY;
+
+                if (e.buttons === 4) { // Middle mouse button
+                    const panSpeed = 0.01;
+                    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+                    const up = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
+                    const panVector = right.multiplyScalar(-deltaX * panSpeed).add(up.multiplyScalar(deltaY * panSpeed));
+
+                    camera.position.add(panVector);
+                    orbitCenter.add(panVector);
+                }
+                else if (e.buttons === 1) { // Left mouse button
+                    const offset = camera.position.clone().sub(orbitCenter);
+                    const spherical = new THREE.Spherical().setFromVector3(offset);
+
+                    spherical.theta -= deltaX * 0.005;
+                    spherical.phi -= deltaY * 0.005;
+                    spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi));
+
+                    offset.setFromSpherical(spherical);
+                    camera.position.copy(orbitCenter).add(offset);
+                }
+                camera.lookAt(orbitCenter);
+            });
+
+            domElement.addEventListener('wheel', e => {
+                const zoomFactor = e.deltaY > 0 ? 1.1 : 0.9;
+                const offset = camera.position.clone().sub(orbitCenter);
+                offset.multiplyScalar(zoomFactor);
+                camera.position.copy(orbitCenter).add(offset);
+            });
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            labelRenderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        init();
+    </script>
+</body>
+
+</html>
