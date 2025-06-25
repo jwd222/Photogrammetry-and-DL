@@ -9,6 +9,8 @@ from PyQt5.QtGui import QColor
 from PyQt5.QtOpenGL import QGLWidget, QGLFormat, QGL
 from OpenGL.GL import *
 from OpenGL.GLU import *
+from scipy.spatial.transform import Rotation
+
 
 class GLWidget(QGLWidget):
     def __init__(self, parent=None):
@@ -337,8 +339,8 @@ class GLWidget(QGLWidget):
             point_epsg = point_epsg.reshape(1, 3)
         
         centered = point_epsg - self.local_origin_3d_vis
-        if self.exaggerate_z_vis:
-            centered[:, 2] *= self.z_exaggeration_factor_vis
+        # if self.exaggerate_z_vis:
+        #     centered[:, 2] *= self.z_exaggeration_factor_vis
         scaled = centered * self.scale_factor_vis
         return scaled.flatten() if point_epsg.shape[0] == 1 else scaled
 
@@ -353,7 +355,7 @@ class GLWidget(QGLWidget):
         original = unscaled + self.local_origin_3d_vis
         return original.flatten() if point_scaled.shape[0] == 1 else original
 
-    def compute_p3p(self):
+    def _compute_p3p(self):
         if len(self.original_world_points) < 3 or len(self.image_points) < 3:
             print("Need at least 3 world and 3 image points to compute PnP.")
             self.camera_found = False
@@ -601,6 +603,187 @@ class GLWidget(QGLWidget):
 
         self.update()
 
+    def compute_p3p(self):
+        """
+        Computes the camera pose from 3D-2D point correspondences using PnP-RANSAC.
+        This version correctly implements pre-processing and post-processing for numerical stability.
+        """
+        if len(self.original_world_points) < 4: # RANSAC needs at least 4 points
+            print("Need at least 4 world and 4 image points for PnP-RANSAC.")
+            self.camera_found = False
+            # ... (rest of your early exit logic)
+            return None
+
+        camera_matrix = np.array([[self.fx, 0, self.cx],
+                                  [0, self.fy, self.cy],
+                                  [0, 0, 1]], dtype=np.float64)
+        dist_coeffs = np.zeros((4, 1), dtype=np.float64)
+
+        # --- 1. PRE-PROCESSING AS PER YOUR METHOD ---
+        # WARNING: This method of scaling K and image points is not standard and can
+        # lead to less stable results than only scaling world points.
+        # The post-processing has been adapted to reverse this specific transformation.
+        world_points_mean = np.mean(self.original_world_points, axis=0)
+        shifted_world_points = self.original_world_points - world_points_mean
+        
+        scale_factor = 100.0
+        
+        scaled_shifted_world_points = shifted_world_points / scale_factor
+        scaled_image_points = self.image_points / scale_factor
+        
+        # Create the scaled camera matrix. Note that K[2,2] must remain 1.
+        scaled_camera_matrix = camera_matrix.copy()
+        scaled_camera_matrix[0, 0] /= scale_factor # fx' = fx / s
+        scaled_camera_matrix[1, 1] /= scale_factor # fy' = fy / s
+        scaled_camera_matrix[0, 2] /= scale_factor # cx' = cx / s
+        scaled_camera_matrix[1, 2] /= scale_factor # cy' = cy / s
+
+        # --- 2. SOLVE PNP WITH PRE-PROCESSED POINTS (OpenCV) ---
+        success, rvec, tvec, inliers = cv2.solvePnPRansac(
+            scaled_shifted_world_points,
+            scaled_image_points,
+            scaled_camera_matrix,
+            dist_coeffs,
+            flags=cv2.SOLVEPNP_ITERATIVE # Using a more robust flag
+        )
+        
+        self.last_inliers = inliers
+
+        if not success:
+            print("PnP solution not found.")
+            return None
+
+        # --- 3. POST-PROCESSING: CORRECT THE POSE (Back Transform) ---
+        # The rotation is invariant to the pre-processing.
+        # rvec = rvec_temp.flatten()
+        # R_processed = Rotation.from_rotvec(rvec).as_matrix()
+
+        # The translation vector must be corrected to account for ALL pre-processing.
+        # Because you scaled the entire system (world, image, and intrinsics),
+        # the output translation vector `tvec_processed` is already in the correct
+        # final scale. We only need to undo the world point shift (the centroid subtraction).
+        # The formula simplifies because the scale factor applied to both sides of the
+        # projection equation effectively cancels out for the translation vector's scale.
+
+        # --- 4. CONVERT TO REQUIRED OUTPUT FORMATS (using SciPy) ---
+        # tvec = tvec_processed.flatten() * scale_factor + world_points_mean
+        # rot_world_to_cam = Rotation.from_rotvec(rvec)
+        # R_world_to_cam = rot_world_to_cam.as_matrix()   
+        # R_cam_to_world = rot_world_to_cam.inv().as_matrix()
+        # camera_position = (-R_cam_to_world @ tvec_processed).flatten()
+        # camera_position_epsg = world_points_mean + camera_position * scale_factor
+        
+        # Convert rotation vector to rotation matrix
+        self.camera_rotation, _ = cv2.Rodrigues(rvec) # This is R_camera_world (world to camera)
+        R_world_to_cam = self.camera_rotation
+        
+
+        R_cam_to_world = R_world_to_cam.T
+        camera_position= (-R_cam_to_world @ tvec).flatten()
+        camera_position_epsg = world_points_mean + camera_position * scale_factor
+        
+        self.camera_position = self.scale_point_for_display(camera_position_epsg)
+        self.camera_found = True
+        
+        euler_angles_deg = Rotation.from_matrix(R_world_to_cam).as_euler('ZYX', degrees=True)
+        yaw_z = euler_angles_deg[2]
+        pitch_y = euler_angles_deg[1]
+        roll_x = euler_angles_deg[0]
+
+
+        print("\n#############################################################################")
+        print("Extrinsic Input Type: Euler")
+        print("  Euler Convention: Extrinsic ZYX (Order: Yaw(Z), Pitch(Y), Roll(X))")
+        print(f"  Euler Angles (Input): [{180 + yaw_z:.5f}, {pitch_y:.5f}, {roll_x:.5f}]")
+        print("Rotation Matrix (R_world_to_cam):")
+        for row in R_world_to_cam:
+            print(f"  [{row[0]: .6f}, {row[1]: .6f}, {row[2]: .6f}]")
+        print(f"Camera Center C (Cx, Cy, Cz): [{camera_position_epsg[0]:.3f}, {camera_position_epsg[1]:.3f}, {camera_position_epsg[2]:.3f}]")
+        print("#############################################################################")
+        
+        # Project world points to image plane
+        scaled_projected_image_points, _ = cv2.projectPoints(
+            scaled_shifted_world_points, # Use original 3D points
+            rvec,                       # The rotation vector from solvePnP
+            tvec,                       # The translation vector from solvePnP
+            scaled_camera_matrix,
+            dist_coeffs
+        )
+        
+        projected_image_points = scaled_projected_image_points.reshape(-1, 2) * scale_factor
+
+        # Calculate reprojection error for each point
+        reprojection_errors = np.linalg.norm(projected_image_points - self.image_points, axis=1)
+
+        # Calculate mean reprojection error
+        mean_reprojection_error = np.mean(reprojection_errors)
+
+        print(f"--- Reprojection Error ---")
+        for i in range(len(self.original_world_points)):
+            # Mark inliers if RANSAC was used
+            inlier_status = ""
+            if self.last_inliers is not None and i in self.last_inliers:
+                inlier_status = " (INLIER)"
+            elif self.last_inliers is not None:
+                inlier_status = " (OUTLIER)"
+
+            print(f"Point {i+1}:{inlier_status}")
+            print(f"  3D World Point (Xw, Yw, Zw): ({self.original_world_points[i][0]:.2f}, {self.original_world_points[i][1]:.2f}, {self.original_world_points[i][2]:.2f})")
+            print(f"  Provided 2D Image Point (u_img, v_img): {self.image_points[i]}")
+            print(f"  Projected (u, v): ({projected_image_points[i, 0]:.2f}, {projected_image_points[i, 1]:.2f})")
+            print(f"  Reprojection Error: {reprojection_errors[i]:.2f} pixels")
+        print(f"Mean Reprojection Error (All Points): {mean_reprojection_error:.2f} pixels")
+
+        if self.last_inliers is not None and len(self.last_inliers) > 0:
+            inlier_reprojection_errors = reprojection_errors[self.last_inliers.flatten()]
+            mean_inlier_reprojection_error = np.mean(inlier_reprojection_errors)
+            print(f"Mean Reprojection Error (Inliers Only): {mean_inlier_reprojection_error:.2f} pixels")
+        print("#############################################################################")
+
+        # --- Calculate 3D points for image plane visualization ---
+        self.image_plane_points_3d = []
+        self.image_plane_corners_3d = []
+
+        if self.camera_found:
+            # Focal length for the image plane (can be scaled for visualization)
+            # Using a small scale factor to make the plane visible and not too large
+            # relative to the camera model.
+            plane_distance = 3 # Distance from camera center to image plane for visualization (in display units)
+            
+            # Calculate image plane corners in camera coordinates (normalized, then scaled)
+            # These are in camera's local coordinate system, so they are not affected by EPSG scaling
+            tl_cam = np.array([(0 - self.cx) / self.fx * plane_distance, (0 - self.cy) / self.fy * plane_distance, plane_distance])            
+            tr_cam = np.array([(self.image_width - self.cx) / self.fx * plane_distance, (0 - self.cy) / self.fy * plane_distance, plane_distance])
+            br_cam = np.array([(self.image_width - self.cx) / self.fx * plane_distance, (self.image_height - self.cy) / self.fy * plane_distance, plane_distance])
+            bl_cam = np.array([(0 - self.cx) / self.fx * plane_distance, (self.image_height - self.cy) / self.fy * plane_distance, plane_distance])
+
+            # Transform corners from camera coordinates to *world EPSG coordinates* first
+            R_world_camera = self.camera_rotation.T # Rotation from camera to world
+            T_world_camera_epsg = camera_position_epsg.reshape(3,1) # Camera center in world EPSG
+
+            corners_epsg = [
+                (R_world_camera @ tl_cam.reshape(3,1) + T_world_camera_epsg).flatten(),
+                (R_world_camera @ tr_cam.reshape(3,1) + T_world_camera_epsg).flatten(),
+                (R_world_camera @ br_cam.reshape(3,1) + T_world_camera_epsg).flatten(),
+                (R_world_camera @ bl_cam.reshape(3,1) + T_world_camera_epsg).flatten()
+            ]
+            
+            # Then scale these EPSG corners for display
+            self.image_plane_corners_3d = [self.scale_point_for_display(corner) for corner in corners_epsg]
+
+            # Project image points onto this 3D plane
+            for img_pt in self.image_points:
+                u, v = img_pt[0], img_pt[1]
+                # Convert 2D pixel to 3D point on the plane in camera coordinates
+                pt_on_plane_cam = np.array([(u - self.cx) / self.fx * plane_distance, (v - self.cy) / self.fy * plane_distance, plane_distance])
+                
+                # Transform to world EPSG coordinates
+                pt_on_plane_epsg = (R_world_camera @ pt_on_plane_cam.reshape(3,1) + T_world_camera_epsg).flatten()
+                
+                # Then scale for display
+                self.image_plane_points_3d.append(self.scale_point_for_display(pt_on_plane_epsg))
+
+        self.update()
 
     def set_point_count(self, n):
         # This method is called by MainWindow.update_num_points_in_dialogs
@@ -781,21 +964,38 @@ class MainWindow(QMainWindow):
         control_layout.setAlignment(Qt.AlignTop)
 
         # Data Storage for EPSG:28992, Intrinsics and Scale factors in visualizers
-        self.current_fx, self.current_fy = 53025.0, 53025.0
-        self.current_cx, self.current_cy = 13200.0, 8470.0
-        self.current_img_w, self.current_img_h = 26400, 16940
-        self.current_world_points_epsg = np.array([[132597.84, 458475.208, 9.7], 
-                                                   [132335.16, 457983.606, 11.6], 
-                                                   [132277.75, 457572.218, 10.5],
-                                                   [132841.53, 457468.09, 33.0],
-                                                #    [131741.69, 458538.793, 13.4],
-                                                   [131697.88, 456621.146, 8.33]], dtype=np.float64)
-        self.current_image_points = np.array([[2281.0, 12643.0], 
-                                              [8256.0, 9466.0], 
-                                              [13229.0, 8773.0], 
-                                              [14488.0, 15641.0], 
-                                            #   [1507.0, 2272.0], 
-                                              [24753.0, 1747.0]], dtype=np.float32)
+        self.current_fx, self.current_fy = 21170.2127, 21170.2127
+        self.current_img_w, self.current_img_h = 14016, 20544
+        self.current_cx, self.current_cy = self.current_img_w/2, self.current_img_h/2
+        self.current_world_points_epsg = np.array([[112989.91409784, 552154.64224467, 0.69480002],
+                                                   [113050.60488278, 552092.87901645, 0.74900001],
+                                                   [113050.71205896, 551689.52053704, 0.53350002],
+                                                   [113490.02724018, 552144.36423022, 0.59299999],
+                                                   [113746.99576700, 551909.75011236, 0.44319999],
+                                                   [113570.84898268, 551796.37950755, 0.48969999],
+                                                   [113713.57496283, 551649.07219962, 0.64929998],
+                                                   [113662.37017820, 551852.85045758, 0.42940000],
+                                                   [113235.42748871, 552191.37642783, 0.39610001],
+                                                   [113381.63397003, 551881.35023998, 0.54180002],
+                                                   [113258.97718460, 551768.33204499, 0.61519998],
+                                                   [113220.07767921, 552009.80907175, 0.45019999],
+                                                   [113567.70224852, 552072.74866445, 5.91109990],
+                                                   [113304.82361679, 552099.70178271, 6.20860000]], dtype=np.float64)
+
+        self.current_image_points = np.array([[12545.07368951,  2035.07012216],
+                                              [11049.46411504,  3492.31905833],
+                                              [ 1339.21411504,  3460.56054769],
+                                              [12242.37610515, 14079.03493827],
+                                              [ 6568.14006286, 20234.66355501],
+                                              [ 3858.84098311, 15985.53682955],
+                                              [  303.34750151, 19400.10047985],
+                                              [ 5207.95179599, 18193.15032648],
+                                              [13402.92917329,  7953.45956728],
+                                              [ 5921.42085209, 11442.91793657],
+                                              [ 3214.90344411,  8480.24055927],
+                                              [ 9030.81295331,  7566.84293657],
+                                              [10530.60990390, 15975.24809446],
+                                              [11214.26447309,  9607.12772893]], dtype=np.float32)
         
         # Scaling parameters for visualization
         self.local_origin_3d = np.array([0.0, 0.0, 0.0], dtype=np.float64) # Will be set to first world point

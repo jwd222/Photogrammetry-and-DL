@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Photogrammetry 3D Viewer</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/renderers/CSS2DRenderer.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div id="viewer-container"></div>
+
+    <div id="ui-container">
+        <div id="controls-panel" class="panel">
+            <div class="panel-header">
+                <h3>Task</h3>
+                <select id="task-selector"></select>
+            </div>
+            <div id="task-controls-container">
+                <!-- Task-specific controls will be injected here -->
+            </div>
+        </div>
+
+        <div id="info-panel" class="panel">
+            <h3>Results</h3>
+            <div id="results-info" class="info-section">Select a task and run it.</div>
+            <div id="reprojection-info" class="info-section"></div>
+        </div>
+    </div>
+
+    <!-- Load Scripts -->
+    <script src="viewer.js"></script>
+    <script src="tasks/task.js"></script>
+    <script src="tasks/pnpTask.js"></script>
+    <!-- Add other tasks here, e.g., <script src="tasks/triangulationTask.js"></script> -->
+    <script src="app.js"></script>
+</body>
+
+</html>
