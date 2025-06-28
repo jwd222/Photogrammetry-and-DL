@@ -131,6 +131,41 @@ def api_solve_pnp():
     except (KeyError, TypeError) as e:
         return jsonify({"success": False, "error": f"Invalid or missing data in request: {e}"}), 400
 
+# In app.py, add this new endpoint function after your existing api_solve_pnp
+
+@app.route('/api/solve-multiple-pnp', methods=['POST'])
+def api_solve_multiple_pnp():
+    """
+    API endpoint to solve for multiple cameras in a single request.
+    Expects a JSON payload like:
+    {
+        "worldPoints": [[x,y,z], ...],
+        "tasks": [
+            { "imagePoints": [[u,v], ...], "cameraIntrinsics": {...} },
+            { "imagePoints": [[u,v], ...], "cameraIntrinsics": {...} }
+        ]
+    }
+    """
+    data = request.get_json()
+
+    try:
+        world_points_np = np.array(data['worldPoints'], dtype=np.float64)
+        tasks = data['tasks']
+
+        results = []
+        for task in tasks:
+            image_points_np = np.array(task['imagePoints'], dtype=np.float32)
+            intrinsics = task['cameraIntrinsics']
+            
+            # REUSE the existing single-pose solver function!
+            pose_result = solve_pnp_pose(world_points_np, image_points_np, intrinsics)
+            results.append(pose_result)
+        
+        return jsonify({"success": True, "results": results})
+
+    except (KeyError, TypeError) as e:
+        return jsonify({"success": False, "error": f"Invalid or missing data in request: {e}"}), 400
+
 
 if __name__ == '__main__':
     # Running in debug mode is helpful for development
