@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-g">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PnP Web Visualizer</title>
+    <style>
+        body { font-family: sans-serif; margin: 0; display: flex; height: 100vh; background-color: #1a1a1a; color: #f0f0f0; }
+        #controls { width: 450px; padding: 15px; overflow-y: auto; background-color: #2a2a2a; border-right: 1px solid #444; }
+        #viewer-container { flex-grow: 1; }
+        h3, h4 { margin-top: 1em; margin-bottom: 0.5em; border-bottom: 1px solid #555; padding-bottom: 5px; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-size: 0.9em; }
+        input, textarea { width: 95%; padding: 8px; border-radius: 4px; border: 1px solid #555; background-color: #333; color: #f0f0f0; }
+        textarea { height: 120px; font-family: monospace; }
+        button { width: 100%; padding: 10px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1.1em; margin-top: 10px; }
+        button:hover { background-color: #0056b3; }
+        #results { margin-top: 15px; background-color: #1e1e1e; padding: 10px; border-radius: 4px; font-family: monospace; white-space: pre-wrap; word-wrap: break-word; }
+    </style>
+</head>
+<body>
+
+    <div id="controls">
+        <h3>PnP Data Input</h3>
+        
+        <div class="control-group">
+            <h4>Camera Intrinsics</h4>
+            <label for="fx">Focal Length (fx)</label>
+            <input type="number" id="fx" value="21170.21">
+            <label for="fy">Focal Length (fy)</label>
+            <input type="number" id="fy" value="21170.21">
+            <label for="cx">Principal Point (cx)</label>
+            <input type="number" id="cx" value="7008">
+            <label for="cy">Principal Point (cy)</label>
+            <input type="number" id="cy" value="10272">
+            <label for="img_w">Image Width</label>
+            <input type="number" id="img_w" value="14016">
+            <label for="img_h">Image Height</label>
+            <input type="number" id="img_h" value="20544">
+        </div>
+
+        <div class="control-group">
+            <h4>3D World Points (EPSG:28992)</h4>
+            <label>One point per line: X, Y, Z</label>
+            <textarea id="world-points">
+112989.91, 552154.64, 0.69
+113050.60, 552092.87, 0.74
+113050.71, 551689.52, 0.53
+113490.02, 552144.36, 0.59
+113746.99, 551909.75, 0.44
+113570.84, 551796.37, 0.48
+113713.57, 551649.07, 0.64
+113662.37, 551852.85, 0.42
+113235.42, 552191.37, 0.39
+113381.63, 551881.35, 0.54
+113258.97, 551768.33, 0.61
+113220.07, 552009.80, 0.45
+            </textarea>
+        </div>
+
+        <div class="control-group">
+            <h4>2D Image Points (Pixels)</h4>
+            <label>One point per line: U, V</label>
+            <textarea id="image-points">
+12545.07, 2035.07
+11049.46, 3492.31
+1339.21, 3460.56
+12242.37, 14079.03
+6568.14, 20234.66
+3858.84, 15985.53
+303.34, 19400.10
+5207.95, 18193.15
+13402.92, 7953.45
+5921.42, 11442.91
+3214.90, 8480.24
+9030.81, 7566.84
+            </textarea>
+        </div>
+
+        <button id="compute-btn">Compute Camera Pose</button>
+
+        <div id="results">
+            Results will appear here...
+        </div>
+    </div>
+
+    <div id="viewer-container"></div>
+
+    <!-- Import maps polyfill for older browsers -->
+    <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+    
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.158.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.158.0/examples/jsm/"
+        }
+    }
+    </script>
+    
+    <script type="module" src="{{ url_for('static', filename='js/viewer.js') }}"></script>
+</body>
+</html>

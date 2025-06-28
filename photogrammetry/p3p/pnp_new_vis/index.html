@@ -217,13 +217,36 @@
         let orbitCenter = new THREE.Vector3(0, 0, 0);
 
         let worldPoints = [
-            [132597.84, 458475.208, 9.7], [132335.16, 457983.606, 11.6],
-            [132277.75, 457572.218, 10.5], [132841.53, 457468.09, 33.0],
-            [131697.88, 456621.146, 8.33]
+            [112989.91409784, 552154.64224467, 0.69480002],
+            [113050.60488278, 552092.87901645, 0.74900001],
+            [113050.71205896, 551689.52053704, 0.53350002],
+            [113490.02724018, 552144.36423022, 0.59299999],
+            [113746.99576700, 551909.75011236, 0.44319999],
+            [113570.84898268, 551796.37950755, 0.48969999],
+            [113713.57496283, 551649.07219962, 0.64929998],
+            [113662.37017820, 551852.85045758, 0.42940000],
+            [113235.42748871, 552191.37642783, 0.39610001],
+            [113381.63397003, 551881.35023998, 0.54180002],
+            [113258.97718460, 551768.33204499, 0.61519998],
+            [113220.07767921, 552009.80907175, 0.45019999],
+            [113567.70224852, 552072.74866445, 5.91109990],
+            [113304.82361679, 552099.70178271, 6.20860000]
         ];
         let imagePoints = [
-            [2281.0, 12643.0], [8256.0, 9466.0], [13229.0, 8773.0],
-            [14488.0, 15641.0], [24753.0, 1747.0]
+            [12545.07368951, 2035.07012216],
+            [11049.46411504, 3492.31905833],
+            [1339.21411504, 3460.56054769],
+            [12242.37610515, 14079.03493827],
+            [6568.14006286, 20234.66355501],
+            [3858.84098311, 15985.53682955],
+            [303.34750151, 19400.10047985],
+            [5207.95179599, 18193.15032648],
+            [13402.92917329, 7953.45956728],
+            [5921.42085209, 11442.91793657],
+            [3214.90344411, 8480.24055927],
+            [9030.81295331, 7566.84293657],
+            [10530.60990390, 15975.24809446],
+            [11214.26447309, 9607.12772893]
         ];
 
         // --- Core three.js and App Logic ---
@@ -355,10 +378,12 @@
 
         async function solvePnP() {
             readInputs();
+            let current_img_w = 14016
+            let current_img_h = 20544
             updateStatus('Sending data to Python backend...', 'loading');
             const payload = {
                 worldPoints: worldPoints, imagePoints: imagePoints,
-                intrinsics: { fx: parseFloat(document.getElementById('fx').value), fy: parseFloat(document.getElementById('fy').value), cx: parseFloat(document.getElementById('cx').value), cy: parseFloat(document.getElementById('cy').value) },
+                intrinsics: { fx: 21170.2127, fy: 21170.2127, cx: current_img_w / 2, cy: current_img_h / 2 }, // { fx: parseFloat(document.getElementById('fx').value), fy: parseFloat(document.getElementById('fy').value), cx: parseFloat(document.getElementById('cx').value), cy: parseFloat(document.getElementById('cy').value) },
                 solverOptions: { reprojErr: parseFloat(document.getElementById('reprojErr').value), iterations: parseInt(document.getElementById('iterations').value) }
             };
             try {
