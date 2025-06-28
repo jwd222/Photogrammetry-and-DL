@@ -3,12 +3,12 @@ import cv2
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 from scipy.spatial.transform import Rotation
-import mimetypes # <--- IMPORT THE LIBRARY
+import mimetypes
 
 # This line ensures that the server serves .js files with the correct MIME type.
 mimetypes.add_type('application/javascript', '.js')
 
-# --- Backend Calculation Logic (Refactored from GLWidget) ---
+# --- Backend Calculation Logic  ---
 
 def solve_pnp_pose(world_points_np, image_points_np, camera_intrinsics):
     """
@@ -131,7 +131,6 @@ def api_solve_pnp():
     except (KeyError, TypeError) as e:
         return jsonify({"success": False, "error": f"Invalid or missing data in request: {e}"}), 400
 
-# In app.py, add this new endpoint function after your existing api_solve_pnp
 
 @app.route('/api/solve-multiple-pnp', methods=['POST'])
 def api_solve_multiple_pnp():
