@@ -340,7 +340,7 @@ class GLWidget(QGLWidget):
         
         centered = point_epsg - self.local_origin_3d_vis
         # if self.exaggerate_z_vis:
-        #     centered[:, 2] *= self.z_exaggeration_factor_vis
+        #     centered[:, 2] *= 2
         scaled = centered * self.scale_factor_vis
         return scaled.flatten() if point_epsg.shape[0] == 1 else scaled
 
@@ -350,8 +350,8 @@ class GLWidget(QGLWidget):
             point_scaled = point_scaled.reshape(1, 3)
 
         unscaled = point_scaled / self.scale_factor_vis
-        if self.exaggerate_z_vis:
-            unscaled[:, 2] /= self.z_exaggeration_factor_vis
+        # if self.exaggerate_z_vis:
+        #     unscaled[:, 2] /= self.z_exaggeration_factor_vis
         original = unscaled + self.local_origin_3d_vis
         return original.flatten() if point_scaled.shape[0] == 1 else original
 
@@ -759,8 +759,9 @@ class MainWindow(QMainWindow):
                                                    [113381.63397003, 551881.35023998, 0.54180002],
                                                    [113258.97718460, 551768.33204499, 0.61519998],
                                                    [113220.07767921, 552009.80907175, 0.45019999],
-                                                   [113567.70224852, 552072.74866445, 5.91109990],
-                                                   [113304.82361679, 552099.70178271, 6.20860000]], dtype=np.float64)
+                                                #    [113567.70224852, 552072.74866445, 5.91109990],
+                                                #    [113304.82361679, 552099.70178271, 6.20860000]
+                                                   ], dtype=np.float64)
 
         self.current_image_points = np.array([[12545.07368951,  2035.07012216],
                                               [11049.46411504,  3492.31905833],
@@ -774,8 +775,9 @@ class MainWindow(QMainWindow):
                                               [ 5921.42085209, 11442.91793657],
                                               [ 3214.90344411,  8480.24055927],
                                               [ 9030.81295331,  7566.84293657],
-                                              [10530.60990390, 15975.24809446],
-                                              [11214.26447309,  9607.12772893]], dtype=np.float32)
+                                            #   [10530.60990390, 15975.24809446],
+                                            #   [11214.26447309,  9607.12772893]
+                                              ], dtype=np.float32)
         
         # Scaling parameters for visualization
         self.local_origin_3d = np.array([0.0, 0.0, 0.0], dtype=np.float64) # Will be set to first world point
