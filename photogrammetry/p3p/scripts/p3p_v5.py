@@ -378,7 +378,7 @@ class GLWidget(QGLWidget):
         world_points_mean = np.mean(self.original_world_points, axis=0)
         shifted_world_points = self.original_world_points - world_points_mean
         
-        scale_factor = 100.0
+        scale_factor = 1.0
         
         scaled_shifted_world_points = shifted_world_points / scale_factor
         scaled_image_points = self.image_points / scale_factor
@@ -783,7 +783,7 @@ class MainWindow(QMainWindow):
         self.local_origin_3d = np.array([0.0, 0.0, 0.0], dtype=np.float64) # Will be set to first world point
         self.scale_factor = 1.0 # Calculated dynamically
         self.z_exaggeration_factor = 1000.0 # Example factor, can be adjusted
-        self.exaggerate_z = True # Toggle for Z exaggeration
+        self.exaggerate_z = False # Toggle for Z exaggeration
 
         # --- Buttons to open dialogs ---
         data_input_group = QGroupBox("Data Input")
@@ -936,7 +936,8 @@ class MainWindow(QMainWindow):
     def calculate_and_set_scaling_params(self):
         """Calculates the local origin and scale factor for visualization."""
         if len(self.current_world_points_epsg) > 0:
-            self.local_origin_3d = self.current_world_points_epsg[0].copy()
+            self.local_origin_3d = np.mean(self.current_world_points_epsg, axis=0)
+            # self.local_origin_3d = self.current_world_points_epsg[0].copy()
         else:
             self.local_origin_3d = np.array([0.0, 0.0, 0.0], dtype=np.float64)
             self.scale_factor = 1.0
