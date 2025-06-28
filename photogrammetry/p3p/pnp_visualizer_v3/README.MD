@@ -1,6 +1,3 @@
----
-
-```markdown
 # 📷 PnP Camera Pose Viewer
 
 This project is a modular and extensible 3D visualization tool using **Three.js** on the frontend and **Flask** on the backend. It is designed to display camera poses and 3D world points based on user input and PnP computations.
