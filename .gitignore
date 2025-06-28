@@ -2,3 +2,4 @@ dataset/
 *.txt
 *.rar
 photogrammetry/p3p/data
+photogrammetry/p3p/pnp_new_vis

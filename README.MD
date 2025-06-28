@@ -5,7 +5,7 @@
 implementation of the mean-shift algorithm in [mean-shift.py](photogrammetry/mean-shift/mean-shift.py) file
 
 ### 2. Projective 3-point Algorithm(p3p)
-implementation of the p3p algorithm with visualizer in [p3p_v4.1.py](photogrammetry/p3p/p3p_v4.1.py) file
+implementation of the p3p algorithm with visualizer in [this](photogrammetry/p3p/pnp_visualizer_v3/) folder
 
 
 # DL
