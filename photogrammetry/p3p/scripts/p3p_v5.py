@@ -355,254 +355,6 @@ class GLWidget(QGLWidget):
         original = unscaled + self.local_origin_3d_vis
         return original.flatten() if point_scaled.shape[0] == 1 else original
 
-    def _compute_p3p(self):
-        if len(self.original_world_points) < 3 or len(self.image_points) < 3:
-            print("Need at least 3 world and 3 image points to compute PnP.")
-            self.camera_found = False
-            self.image_plane_points_3d = []
-            self.image_plane_corners_3d = []
-            self.update()
-            return
-
-        camera_matrix = np.array([[self.fx, 0, self.cx], 
-                                  [0, self.fy, self.cy], 
-                                  [0, 0, 1]], dtype=np.float64)        
-        # No distortion coefficients for simplicity, assume ideal camera
-        dist_coeffs = np.zeros((4, 1), dtype=np.float64) 
-        
-        # Use self.original_world_points for solvePnP
-        world_points_for_pnp = self.original_world_points.reshape(-1, 1, 3)
-        image_points_for_pnp = self.image_points.reshape(-1, 1, 2)
-
-        # use_generic = self.pnp_flag in [
-        #     cv2.SOLVEPNP_P3P,
-        #     cv2.SOLVEPNP_AP3P,
-        #     cv2.SOLVEPNP_DLS
-        # ]
-
-        # if use_generic:
-        #     success, rvecs, tvecs, _ = cv2.solvePnPGeneric(
-        #         world_points_for_pnp,
-        #         image_points_for_pnp,
-        #         camera_matrix,
-        #         dist_coeffs,
-        #         flags=self.pnp_flag
-        #     )
-        # else:
-        #     success, rvec, tvec = cv2.solvePnP(
-        #         world_points_for_pnp,
-        #         image_points_for_pnp,
-        #         camera_matrix,
-        #         dist_coeffs,
-        #         flags=self.pnp_flag
-        #     )
-        #     rvecs = [rvec]
-        #     tvecs = [tvec]
-    
-        # debug
-        # success, rvecs, tvecs, _ = cv2.solvePnPGeneric (
-        #     world_points_for_pnp,
-        #     image_points_for_pnp,
-        #     camera_matrix,
-        #     dist_coeffs,
-        #     flags=cv2.SOLVEPNP_SQPNP
-        # )
-        
-        success, rvec, tvec, inliers = cv2.solvePnPRansac(
-            world_points_for_pnp,
-            image_points_for_pnp,
-            camera_matrix,
-            dist_coeffs,
-            reprojectionError=5.0,
-            iterationsCount=100, # Number of RANSAC iterations
-            confidence=0.99,     # Desired confidence
-            flags=cv2.SOLVEPNP_EPNP # Internal PnP method for RANSAC
-        )
-        
-        rvecs = [rvec] # RANSAC returns a single best solution
-        tvecs = [tvec]
-        self.last_inliers = inliers # Store inliers for reporting
-        pass
-
-
-        if not success or len(rvecs) == 0:
-            print("PnP solution not found. Check point data or intrinsics.")
-            self.camera_found = False
-            self.image_plane_points_3d = []
-            self.image_plane_corners_3d = []
-            self.update()
-            return
-
-        # print(f"Found {len(rvecs)} solution(s) using flag {self.pnp_flag}.")
-        print(f"Found {len(rvecs)} solution(s) using flag 'cv2.SOLVEPNP_EPNP', reprojectionError=5.0, iterationsCount=100, confidence=0.99.")
-
-        best_idx = 0
-        if self.use_estimated_pose_for_disambiguation:
-            print("Using estimated pose for disambiguation...")
-            min_diff = float('inf')
-            
-            # Convert estimated Euler angles to rotation matrix
-            roll_rad, pitch_rad, yaw_rad = np.deg2rad(self.estimated_camera_rotation_euler)
-
-            Rx = np.array([[1, 0, 0],
-                           [0, np.cos(roll_rad), -np.sin(roll_rad)],
-                           [0, np.sin(roll_rad), np.cos(roll_rad)]], dtype=np.float64)
-            Ry = np.array([[np.cos(pitch_rad), 0, np.sin(pitch_rad)],
-                           [0, 1, 0],
-                           [-np.sin(pitch_rad), 0, np.cos(pitch_rad)]], dtype=np.float64)
-            Rz = np.array([[np.cos(yaw_rad), -np.sin(yaw_rad), 0],
-                           [np.sin(yaw_rad), np.cos(yaw_rad), 0],
-                           [0, 0, 1]], dtype=np.float64)
-            
-            # R_est_camera_world is the rotation matrix from world to camera coordinates for the estimate
-            R_est_camera_world = Rz @ Ry @ Rx 
-            
-            # T_est_tvec is the translation of the world origin in camera coordinates for the estimate
-            # C_world_est = self.estimated_camera_position_epsg (camera center in world EPSG)
-            # T_camera_world_est = -R_camera_world_est @ C_world_est
-            T_est_tvec = -R_est_camera_world @ self.estimated_camera_position_epsg.reshape(3,1)
-
-
-            for i in range(len(rvecs)):
-                rvec_candidate = rvecs[i]
-                tvec_candidate = tvecs[i] # This tvec is in original EPSG units from solvePnP
-
-                R_candidate, _ = cv2.Rodrigues(rvec_candidate)
-                
-                # Calculate translation difference (both tvecs are in original EPSG units)
-                trans_diff = np.linalg.norm(tvec_candidate - T_est_tvec)
-                
-                # Calculate rotation difference (angular distance)
-                R_diff = R_candidate @ R_est_camera_world.T # R_candidate * R_est_inv
-                rvec_diff, _ = cv2.Rodrigues(R_diff)
-                rot_diff = np.linalg.norm(rvec_diff) # Magnitude of rotation vector is angle in radians
-
-                # Combine differences (can be weighted)
-                total_diff = trans_diff + rot_diff * 10 # Weight rotation more as it's in radians
-
-                if total_diff < min_diff:
-                    min_diff = total_diff
-                    best_idx = i
-            print(f"Selected solution {best_idx+1} based on minimum difference ({min_diff:.4f}) to estimate.")
-            
-        rvec = rvecs[best_idx]
-        tvec = tvecs[best_idx]
-
-        # Convert rotation vector to rotation matrix
-        self.camera_rotation, _ = cv2.Rodrigues(rvec) # This is R_camera_world (world to camera)
-        
-        # Calculate camera's position in world coordinates (EPSG)
-        # C_world = -R_world_camera * T_camera_world
-        # where R_world_camera = R_camera_world.T (self.camera_rotation.T)
-        # and T_camera_world is tvec
-        camera_position_epsg = (-self.camera_rotation.T @ tvec).flatten()
-        
-        # Store the camera position in display coordinates for OpenGL
-        self.camera_position = self.scale_point_for_display(camera_position_epsg)
-        self.camera_found = True
-
-        # --- Output Extrinsic Parameters ---
-        # R_world_to_cam is the rotation matrix from world to camera coordinates, which is self.camera_rotation
-        R_world_to_cam_matrix = self.camera_rotation 
-        
-        # Decompose R_world_to_cam into ZYX Euler angles (Yaw, Pitch, Roll)
-        # cv2.RQDecomp3x3 returns (roll_x, pitch_y, yaw_z) in degrees for ZYX extrinsic convention.
-        euler_angles_raw = cv2.RQDecomp3x3(R_world_to_cam_matrix)[0] 
-        yaw_z = euler_angles_raw[2]
-        pitch_y = euler_angles_raw[1]
-        roll_x = euler_angles_raw[0]
-
-        print("\n#############################################################################")
-        print("Extrinsic Input Type: Euler")
-        print("  Euler Convention: Extrinsic ZYX (Order: Yaw(Z), Pitch(Y), Roll(X))")
-        print(f"  Euler Angles (Input): [{yaw_z:.5f}, {pitch_y:.5f}, {roll_x:.5f}]")
-        print("Rotation Matrix (R_world_to_cam):\n", R_world_to_cam_matrix)
-        print(f"Camera Center C (Cx, Cy, Cz): [{camera_position_epsg[0]:.3f}, {camera_position_epsg[1]:.3f}, {camera_position_epsg[2]:.3f}]")
-        print("#############################################################################")
-        # Project world points to image plane
-        projected_image_points, _ = cv2.projectPoints(
-            self.original_world_points, # Use original 3D points
-            rvec,                       # The rotation vector from solvePnP
-            tvec,                       # The translation vector from solvePnP
-            camera_matrix,
-            dist_coeffs
-        )
-
-        projected_image_points = projected_image_points.reshape(-1, 2)
-
-        # Calculate reprojection error for each point
-        reprojection_errors = np.linalg.norm(projected_image_points - self.image_points, axis=1)
-
-        # Calculate mean reprojection error
-        mean_reprojection_error = np.mean(reprojection_errors)
-
-        print(f"--- Reprojection Error ---")
-        for i in range(len(self.original_world_points)):
-            # Mark inliers if RANSAC was used
-            inlier_status = ""
-            if self.last_inliers is not None and i in self.last_inliers:
-                inlier_status = " (INLIER)"
-            elif self.last_inliers is not None:
-                inlier_status = " (OUTLIER)"
-
-            print(f"Point {i+1}:{inlier_status}")
-            print(f"  3D World Point (Xw, Yw, Zw): {self.original_world_points[i]}")
-            print(f"  Provided 2D Image Point (u_img, v_img): {self.image_points[i]}")
-            print(f"  Projected (u, v): ({projected_image_points[i, 0]:.2f}, {projected_image_points[i, 1]:.2f})")
-            print(f"  Reprojection Error: {reprojection_errors[i]:.2f} pixels")
-        print(f"Mean Reprojection Error (All Points): {mean_reprojection_error:.2f} pixels")
-
-        if self.last_inliers is not None and len(self.last_inliers) > 0:
-            inlier_reprojection_errors = reprojection_errors[self.last_inliers.flatten()]
-            mean_inlier_reprojection_error = np.mean(inlier_reprojection_errors)
-            print(f"Mean Reprojection Error (Inliers Only): {mean_inlier_reprojection_error:.2f} pixels")
-        print("#############################################################################")
-        
-        # --- Calculate 3D points for image plane visualization ---
-        self.image_plane_points_3d = []
-        self.image_plane_corners_3d = []
-
-        if self.camera_found:
-            # Focal length for the image plane (can be scaled for visualization)
-            # Using a small scale factor to make the plane visible and not too large
-            # relative to the camera model.
-            plane_distance = 3 # Distance from camera center to image plane for visualization (in display units)
-            
-            # Calculate image plane corners in camera coordinates (normalized, then scaled)
-            # These are in camera's local coordinate system, so they are not affected by EPSG scaling
-            tl_cam = np.array([(0 - self.cx) / self.fx * plane_distance, (0 - self.cy) / self.fy * plane_distance, plane_distance])            
-            tr_cam = np.array([(self.image_width - self.cx) / self.fx * plane_distance, (0 - self.cy) / self.fy * plane_distance, plane_distance])
-            br_cam = np.array([(self.image_width - self.cx) / self.fx * plane_distance, (self.image_height - self.cy) / self.fy * plane_distance, plane_distance])
-            bl_cam = np.array([(0 - self.cx) / self.fx * plane_distance, (self.image_height - self.cy) / self.fy * plane_distance, plane_distance])
-
-            # Transform corners from camera coordinates to *world EPSG coordinates* first
-            R_world_camera = self.camera_rotation.T # Rotation from camera to world
-            T_world_camera_epsg = camera_position_epsg.reshape(3,1) # Camera center in world EPSG
-
-            corners_epsg = [
-                (R_world_camera @ tl_cam.reshape(3,1) + T_world_camera_epsg).flatten(),
-                (R_world_camera @ tr_cam.reshape(3,1) + T_world_camera_epsg).flatten(),
-                (R_world_camera @ br_cam.reshape(3,1) + T_world_camera_epsg).flatten(),
-                (R_world_camera @ bl_cam.reshape(3,1) + T_world_camera_epsg).flatten()
-            ]
-            
-            # Then scale these EPSG corners for display
-            self.image_plane_corners_3d = [self.scale_point_for_display(corner) for corner in corners_epsg]
-
-            # Project image points onto this 3D plane
-            for img_pt in self.image_points:
-                u, v = img_pt[0], img_pt[1]
-                # Convert 2D pixel to 3D point on the plane in camera coordinates
-                pt_on_plane_cam = np.array([(u - self.cx) / self.fx * plane_distance, (v - self.cy) / self.fy * plane_distance, plane_distance])
-                
-                # Transform to world EPSG coordinates
-                pt_on_plane_epsg = (R_world_camera @ pt_on_plane_cam.reshape(3,1) + T_world_camera_epsg).flatten()
-                
-                # Then scale for display
-                self.image_plane_points_3d.append(self.scale_point_for_display(pt_on_plane_epsg))
-
-        self.update()
-
     def compute_p3p(self):
         """
         Computes the camera pose from 3D-2D point correspondences using PnP-RANSAC.
@@ -637,6 +389,52 @@ class GLWidget(QGLWidget):
         scaled_camera_matrix[1, 1] /= scale_factor # fy' = fy / s
         scaled_camera_matrix[0, 2] /= scale_factor # cx' = cx / s
         scaled_camera_matrix[1, 2] /= scale_factor # cy' = cy / s
+        
+        
+        # # --- 1. Your Initial Guess Data ---
+        # # The initial guess of the CAMERA's pose in the ORIGINAL WORLD coordinate system
+        # t_wc_guess_original = np.array([113332.35654, 551927.80771, 880.17058])
+        # euler_degrees_guess = [-0.09765364, -0.02852858, 90.23929679] # [yaw, pitch, roll]
+
+        # # --- THIS IS THE KEY CORRECTION ---
+        # # Apply the 180-degree yaw adjustment to the initial guess to align it
+        # # with the expected output coordinate system.
+        # # Assuming 'ZYX' order, yaw is the first angle (Z-axis).
+        # adjusted_euler_guess = euler_degrees_guess.copy()
+        # adjusted_euler_guess[0] =  abs(adjusted_euler_guess[0]) - 180 # Add 180 to the yaw component
+        # # adjusted_euler_guess[0] += 180 # Add 180 to the yaw component
+
+        # # A. Transform the translation guess to match the pre-processed world points
+        # t_wc_guess_scaled = (t_wc_guess_original - world_points_mean) / scale_factor
+
+        # # B. Convert the *adjusted* Euler angles to a rotation matrix (R_wc)
+        # # Use the 'ZYX' convention as before.
+        # r = Rotation.from_euler('ZYX', adjusted_euler_guess, degrees=True)
+        # R_wc_guess = r.as_matrix()
+
+        # # C. Invert the pose to get the OBJECT's pose in the CAMERA frame
+        # R_cw_guess = R_wc_guess.T
+        # t_cw_guess_scaled = -R_cw_guess @ t_wc_guess_scaled
+
+        # # D. Convert to OpenCV's rvec/tvec format
+        # rvec_guess, _ = cv2.Rodrigues(R_cw_guess)
+        # tvec_guess = t_cw_guess_scaled.reshape(3, 1)
+        
+        # print("\nFinal rvec for solvePnP:\n", rvec_guess)
+        # print("\nFinal tvec for solvePnP:\n", tvec_guess)
+
+        # # print("\n--- Converted for OpenCV ---")
+        # # print("Refined Rotation Matrix (Object in Camera):\n", R_cw_guess)
+        # # print("\nRefined Translation Vector (Object in Camera):\n", t_cw_guess)
+
+        # # # --- 4. Convert the Final Rotation Matrix to a Rotation Vector (rvec) ---
+        # # # OpenCV's Rodrigues function does this conversion.
+        # # rvec_guess, _ = cv2.Rodrigues(R_cw_guess)
+        # # tvec_guess = t_cw_guess.reshape(3, 1) # Ensure tvec is a column vector
+
+
+        # # --- 5. Now, use these guesses with solvePnPRansac ---
+        
 
         # --- 2. SOLVE PNP WITH PRE-PROCESSED POINTS (OpenCV) ---
         success, rvec, tvec, inliers = cv2.solvePnPRansac(
@@ -644,6 +442,9 @@ class GLWidget(QGLWidget):
             scaled_image_points,
             scaled_camera_matrix,
             dist_coeffs,
+            reprojectionError=5.0,
+            iterationsCount=100, # Number of RANSAC iterations
+            confidence=0.99,     # Desired confidence
             flags=cv2.SOLVEPNP_ITERATIVE # Using a more robust flag
         )
         
@@ -652,31 +453,10 @@ class GLWidget(QGLWidget):
         if not success:
             print("PnP solution not found.")
             return None
-
-        # --- 3. POST-PROCESSING: CORRECT THE POSE (Back Transform) ---
-        # The rotation is invariant to the pre-processing.
-        # rvec = rvec_temp.flatten()
-        # R_processed = Rotation.from_rotvec(rvec).as_matrix()
-
-        # The translation vector must be corrected to account for ALL pre-processing.
-        # Because you scaled the entire system (world, image, and intrinsics),
-        # the output translation vector `tvec_processed` is already in the correct
-        # final scale. We only need to undo the world point shift (the centroid subtraction).
-        # The formula simplifies because the scale factor applied to both sides of the
-        # projection equation effectively cancels out for the translation vector's scale.
-
-        # --- 4. CONVERT TO REQUIRED OUTPUT FORMATS (using SciPy) ---
-        # tvec = tvec_processed.flatten() * scale_factor + world_points_mean
-        # rot_world_to_cam = Rotation.from_rotvec(rvec)
-        # R_world_to_cam = rot_world_to_cam.as_matrix()   
-        # R_cam_to_world = rot_world_to_cam.inv().as_matrix()
-        # camera_position = (-R_cam_to_world @ tvec_processed).flatten()
-        # camera_position_epsg = world_points_mean + camera_position * scale_factor
         
         # Convert rotation vector to rotation matrix
         self.camera_rotation, _ = cv2.Rodrigues(rvec) # This is R_camera_world (world to camera)
-        R_world_to_cam = self.camera_rotation
-        
+        R_world_to_cam = self.camera_rotation        
 
         R_cam_to_world = R_world_to_cam.T
         camera_position= (-R_cam_to_world @ tvec).flatten()
